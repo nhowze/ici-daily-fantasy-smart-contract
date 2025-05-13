@@ -1,0 +1,44 @@
+.anchor
+.DS_Store
+target
+**/*.rs.bk
+node_modules
+test-ledger
+.yarn
+
+# === Node/JS/TS related ===
+node_modules/
+yarn.lock
+package-lock.json
+.DS_Store
+
+# === Anchor & Rust build artifacts ===
+target/
+.anchor/
+Cargo.lock
+
+# === IDE/editor files ===
+.vscode/
+.idea/
+
+# === Anchor migration logs ===
+migrations/deploy.json
+migrations/*.log
+
+# === Environment and wallet files ===
+.env
+.env.local
+.env.*.local
+*.keypair.json
+*.pem
+*.solana
+
+# === Optional: compiled/generated artifacts ===
+app/.next/
+dist/
+build/
+
+# === MacOS/Linux generated ===
+*.swp
+*~
+

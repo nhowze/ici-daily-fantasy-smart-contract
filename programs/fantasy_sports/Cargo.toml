@@ -1,0 +1,21 @@
+[package]
+name = "fantasy_sports"
+version = "0.1.0"
+description = "Fantasy sports smart contract"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "fantasy_sports"
+
+[features]
+default = []
+no-entrypoint = []
+cpi = ["no-entrypoint"]
+
+[dependencies]
+anchor-lang = "0.28.0"
+anchor-spl = "0.28.0"
+solana-program = "=1.16.24"
+spl-token = { version = "3.5.0", features = ["no-entrypoint"], default-features = false }
+spl-memo = { version = "3.0.1", default-features = false }

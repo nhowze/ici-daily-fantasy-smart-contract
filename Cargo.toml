@@ -1,0 +1,12 @@
+[workspace]
+members = [
+    "programs/fantasy_sports"
+]
+resolver = "2"
+
+[profile.release]
+overflow-checks = true
+
+
+
+
