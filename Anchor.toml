@@ -6,7 +6,7 @@ resolution = true
 skip-lint = false
 
 [programs.devnet]
-fantasy_sports = "3VpS4AVtY1QEHFYQn2W6d688PS8jtPLYMFVupQZP7Zru"
+fantasy_sports = "8WbSTYKCQa2cuL3tZeMbfwwBaAaVvxCQbwnpHGM2HGwV"
 
 [registry]
 url = "https://api.apr.dev"

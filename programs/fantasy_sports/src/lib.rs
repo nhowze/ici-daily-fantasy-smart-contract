@@ -1,11 +1,7 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Mint, TokenAccount, Token, MintTo, InitializeMint};
-// use mpl_token_metadata::instruction::create_metadata_accounts_v3;
-// use mpl_token_metadata::state::Creator;
-// use anchor_lang::solana_program::program::invoke_signed;
-// use std::str::FromStr;
 
-declare_id!("3VpS4AVtY1QEHFYQn2W6d688PS8jtPLYMFVupQZP7Zru");
+declare_id!("8WbSTYKCQa2cuL3tZeMbfwwBaAaVvxCQbwnpHGM2HGwV");
 
 pub const ROYALTY_BPS: u16 = 250;
 
@@ -19,7 +15,7 @@ pub mod fantasy_sports {
         sport_name: String,
         player_id: Pubkey,
         stat_line: u32,
-        betting_deadline: i64
+        betting_deadline: i64,
     ) -> Result<()> {
         let bet_pool = &mut ctx.accounts.bet_pool;
         bet_pool.fixture_id = fixture_id;
@@ -49,9 +45,17 @@ pub mod fantasy_sports {
         let platform_fee = amount * 500 / 10000;
         let pool_amount = amount - platform_fee;
 
+        let (expected_fee_vault, _) = Pubkey::find_program_address(
+            &[b"fee_vault", bet_pool.key().as_ref()],
+            ctx.program_id,
+        );
+        require_keys_eq!(expected_fee_vault, ctx.accounts.fee_vault.key(), ErrorCode::InvalidFeeVault);
+
         **ctx.accounts.bettor.try_borrow_mut_lamports()? -= amount;
         **ctx.accounts.fee_vault.try_borrow_mut_lamports()? += platform_fee;
         **bet_pool.to_account_info().try_borrow_mut_lamports()? += pool_amount;
+
+        bet_pool.fee_collected += platform_fee;
 
         if pick_side {
             bet_pool.over_total += pool_amount;
@@ -69,11 +73,11 @@ pub mod fantasy_sports {
                 InitializeMint {
                     mint: mint.to_account_info(),
                     rent: ctx.accounts.rent.to_account_info(),
-                }
+                },
             ),
             0,
             &mint_authority.key(),
-            Some(&mint_authority.key())
+            Some(&mint_authority.key()),
         )?;
 
         token::mint_to(
@@ -83,48 +87,11 @@ pub mod fantasy_sports {
                     mint: mint.to_account_info(),
                     to: ctx.accounts.user_ata.to_account_info(),
                     authority: mint_authority.to_account_info(),
-                }
-            ).with_signer(&[&[b"mint_authority", &[*ctx.bumps.get("mint_authority").ok_or(ErrorCode::MissingBump)?]]]),
-            1
+                },
+            )
+            .with_signer(&[&[b"mint_authority", &[*ctx.bumps.get("mint_authority").ok_or(ErrorCode::MissingBump)?]]]),
+            1,
         )?;
-
-        /*
-        let creator = Creator {
-            address: Pubkey::from_str("GptKYYpqJg2quF785RQeDsbsF5JV2uvFy2RPuEJNdXRA").unwrap(),
-            verified: false,
-            share: 100,
-        };
-
-        invoke_signed(
-            &create_metadata_accounts_v3(
-                ctx.accounts.metadata_program.key(),
-                ctx.accounts.metadata_account.key(),
-                mint.key(),
-                mint_authority.key(),
-                ctx.accounts.bettor.key(),
-                mint_authority.key(),
-                "Fantasy Bet NFT".to_string(),
-                "PICK".to_string(),
-                "https://arweave.net/placeholder-metadata.json".to_string(),
-                Some(vec![creator]),
-                ROYALTY_BPS,
-                true,
-                true,
-                None,
-                None,
-                None,
-            ),
-            &[
-                ctx.accounts.metadata_account.to_account_info(),
-                mint.to_account_info(),
-                mint_authority.to_account_info(),
-                ctx.accounts.bettor.to_account_info(),
-                ctx.accounts.system_program.to_account_info(),
-                ctx.accounts.rent.to_account_info(),
-            ],
-            &[&[b"mint_authority", &[*ctx.bumps.get("mint_authority").ok_or(ErrorCode::MissingBump)?]]],
-        )?;
-        */
 
         user_pick.owner = ctx.accounts.bettor.key();
         user_pick.bet_amount = amount;
@@ -180,7 +147,11 @@ pub mod fantasy_sports {
         Ok(())
     }
 
-    pub fn withdraw_fees(ctx: Context<WithdrawFees>, amount: u64) -> Result<()> {
+    pub fn withdraw_fees(ctx: Context<WithdrawFees>) -> Result<()> {
+        let pool = &mut ctx.accounts.bet_pool;
+        let amount = pool.fee_collected;
+        pool.fee_collected = 0;
+
         **ctx.accounts.fee_vault.try_borrow_mut_lamports()? -= amount;
         **ctx.accounts.recipient.try_borrow_mut_lamports()? += amount;
         Ok(())
@@ -195,7 +166,7 @@ pub struct InitializeBetPool<'info> {
         seeds = [b"bet_pool", fixture_id.to_le_bytes().as_ref()],
         bump,
         payer = admin,
-        space = 8 + 256
+        space = 8 + 512
     )]
     pub bet_pool: Account<'info, BetPool>,
     #[account(mut)]
@@ -217,22 +188,24 @@ pub struct PlaceBet<'info> {
         space = 8 + 128
     )]
     pub user_pick: Account<'info, UserPick>,
-    #[account(mut)]
-    pub fee_vault: SystemAccount<'info>,
+    #[account(
+        mut,
+        seeds = [b"fee_vault", bet_pool.key().as_ref()],
+        bump
+    )]
+    /// CHECK:
+    pub fee_vault: UncheckedAccount<'info>,
     #[account(mut)]
     pub nft_mint: Account<'info, Mint>,
     #[account(mut)]
     pub user_ata: Account<'info, TokenAccount>,
-    #[account(
-        seeds = [b"mint_authority"],
-        bump
-    )]
-    /// CHECK: This will be a PDA mint authority
+    #[account(seeds = [b"mint_authority"], bump)]
+    /// CHECK:
     pub mint_authority: UncheckedAccount<'info>,
-    /// CHECK: Metaplex metadata account
+    /// CHECK:
     #[account(mut)]
     pub metadata_account: UncheckedAccount<'info>,
-    /// CHECK: This is the Token Metadata program and is assumed to be correct.
+    /// CHECK:
     pub metadata_program: UncheckedAccount<'info>,
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
@@ -241,7 +214,7 @@ pub struct PlaceBet<'info> {
 
 #[derive(Accounts)]
 pub struct PublishResult<'info> {
-    #[account(mut, has_one = authority)]
+    #[account(mut)]
     pub bet_pool: Account<'info, BetPool>,
     pub authority: Signer<'info>,
 }
@@ -254,7 +227,7 @@ pub struct SettleClaim<'info> {
     pub bet_pool: Account<'info, BetPool>,
     #[account(mut)]
     pub recipient: SystemAccount<'info>,
-    /// CHECK: Needed for `has_one = owner`
+    /// CHECK:
     pub owner: UncheckedAccount<'info>,
 }
 
@@ -263,7 +236,14 @@ pub struct WithdrawFees<'info> {
     #[account(mut)]
     pub admin: Signer<'info>,
     #[account(mut)]
-    pub fee_vault: SystemAccount<'info>,
+    pub bet_pool: Account<'info, BetPool>,
+    #[account(
+        mut,
+        seeds = [b"fee_vault", bet_pool.key().as_ref()],
+        bump
+    )]
+    /// CHECK:
+    pub fee_vault: UncheckedAccount<'info>,
     #[account(mut)]
     pub recipient: SystemAccount<'info>,
 }
@@ -315,4 +295,6 @@ pub enum ErrorCode {
     AlreadyClaimed,
     #[msg("Required bump seed is missing.")]
     MissingBump,
+    #[msg("Invalid fee vault PDA")]
+    InvalidFeeVault,
 }
