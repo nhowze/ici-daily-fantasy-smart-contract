@@ -1,19 +1,15 @@
-[toolchain]
-anchor_version = "0.28.0"
+[workspace]
+members = ["programs/fantasy_sports"]
 
-[features]
-resolution = true
-skip-lint = false
+[toolchain]
+anchor_version = "0.31.1"
 
 [programs.devnet]
-fantasy_sports = "8WbSTYKCQa2cuL3tZeMbfwwBaAaVvxCQbwnpHGM2HGwV"
+fantasy_sports = "2yj1FY4Q7TPL3x5Zyuu8PhKv89A9QTGm5pJdDrbNs9My"
 
-[registry]
-url = "https://api.apr.dev"
+[programs.localnet]
+fantasy_sports = "2yj1FY4Q7TPL3x5Zyuu8PhKv89A9QTGm5pJdDrbNs9My"
 
 [provider]
 cluster = "devnet"
 wallet = "~/.config/solana/id.json"
-
-[scripts]
-test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"

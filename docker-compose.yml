@@ -1,0 +1,17 @@
+version: "3.8"
+
+services:
+  my-anchor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: my-anchor
+    container_name: my-anchor
+    tty: true
+    working_dir: /project
+    volumes:
+      - ./:/project
+      - ~/.config/solana:/root/.config/solana
+      - ./target:/project/target
+    environment:
+      - PATH=/usr/local/solana/bin:/root/.cargo/bin:/usr/local/bin:/usr/bin:/bin

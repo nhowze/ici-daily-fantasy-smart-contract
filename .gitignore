@@ -5,6 +5,8 @@ target
 node_modules
 test-ledger
 .yarn
+yarn-error.log
+rustup.log
 
 # === Node/JS/TS related ===
 node_modules/
@@ -20,6 +22,7 @@ Cargo.lock
 # === IDE/editor files ===
 .vscode/
 .idea/
+.vs/
 
 # === Anchor migration logs ===
 migrations/deploy.json

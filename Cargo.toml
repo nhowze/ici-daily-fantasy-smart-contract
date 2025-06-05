@@ -1,12 +1,12 @@
 [workspace]
-members = [
-    "programs/fantasy_sports"
-]
-resolver = "2"
+members = ["programs/fantasy_sports"]
+
+[workspace.package]
+edition = "2021"
+
+[workspace.dependencies]
+anchor-lang = "0.31.1"
+anchor-spl = "0.31.1"
 
 [profile.release]
 overflow-checks = true
-
-
-
-

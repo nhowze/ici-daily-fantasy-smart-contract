@@ -1,9 +1,14 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Mint, TokenAccount, Token, MintTo, InitializeMint};
 
-declare_id!("8WbSTYKCQa2cuL3tZeMbfwwBaAaVvxCQbwnpHGM2HGwV");
+declare_id!("2yj1FY4Q7TPL3x5Zyuu8PhKv89A9QTGm5pJdDrbNs9My");
 
 pub const ROYALTY_BPS: u16 = 250;
+pub const DISCRIMINATOR_SIZE: usize = 8;
+
+pub fn size_of<T>() -> usize {
+    std::mem::size_of::<T>() + DISCRIMINATOR_SIZE
+}
 
 #[program]
 pub mod fantasy_sports {
@@ -19,7 +24,14 @@ pub mod fantasy_sports {
     ) -> Result<()> {
         let bet_pool = &mut ctx.accounts.bet_pool;
         bet_pool.fixture_id = fixture_id;
-        bet_pool.sport_name = sport_name;
+
+        // Safe copy — prevents panic if sport_name.len() > 32
+        let mut name_bytes = [0u8; 32];
+        let name_slice = sport_name.as_bytes();
+        let copy_len = name_slice.len().min(32);
+        name_bytes[..copy_len].copy_from_slice(&name_slice[..copy_len]);
+        bet_pool.sport_name = name_bytes;
+
         bet_pool.player_id = player_id;
         bet_pool.stat_line = stat_line;
         bet_pool.betting_deadline = betting_deadline;
@@ -49,7 +61,11 @@ pub mod fantasy_sports {
             &[b"fee_vault", bet_pool.key().as_ref()],
             ctx.program_id,
         );
-        require_keys_eq!(expected_fee_vault, ctx.accounts.fee_vault.key(), ErrorCode::InvalidFeeVault);
+        require_keys_eq!(
+            expected_fee_vault,
+            ctx.accounts.fee_vault.key(),
+            ErrorCode::InvalidFeeVault
+        );
 
         **ctx.accounts.bettor.try_borrow_mut_lamports()? -= amount;
         **ctx.accounts.fee_vault.try_borrow_mut_lamports()? += platform_fee;
@@ -89,7 +105,7 @@ pub mod fantasy_sports {
                     authority: mint_authority.to_account_info(),
                 },
             )
-            .with_signer(&[&[b"mint_authority", &[*ctx.bumps.get("mint_authority").ok_or(ErrorCode::MissingBump)?]]]),
+            .with_signer(&[&[b"mint_authority", &[ctx.bumps.mint_authority]]]),
             1,
         )?;
 
@@ -99,7 +115,7 @@ pub mod fantasy_sports {
         user_pick.pool = bet_pool.key();
         user_pick.claimed = false;
         user_pick.mint = mint.key();
-        user_pick.bump = *ctx.bumps.get("user_pick").ok_or(ErrorCode::MissingBump)?;
+        user_pick.bump = ctx.bumps.user_pick;
 
         Ok(())
     }
@@ -158,17 +174,24 @@ pub mod fantasy_sports {
     }
 }
 
+
 #[derive(Accounts)]
 #[instruction(fixture_id: u64, sport_name: String, player_id: Pubkey, stat_line: u32)]
 pub struct InitializeBetPool<'info> {
     #[account(
         init,
-        seeds = [b"bet_pool", fixture_id.to_le_bytes().as_ref()],
+        seeds = [
+            b"bet_pool",
+            fixture_id.to_le_bytes().as_ref(),
+            player_id.as_ref(),
+            &stat_line.to_le_bytes()
+        ],
         bump,
         payer = admin,
-        space = 8 + 512
+        space = size_of::<BetPool>()
     )]
     pub bet_pool: Account<'info, BetPool>,
+
     #[account(mut)]
     pub admin: Signer<'info>,
     pub system_program: Program<'info, System>,
@@ -185,7 +208,7 @@ pub struct PlaceBet<'info> {
         seeds = [b"user_pick", bettor.key().as_ref(), bet_pool.key().as_ref()],
         bump,
         payer = bettor,
-        space = 8 + 128
+        space = size_of::<UserPick>()
     )]
     pub user_pick: Account<'info, UserPick>,
     #[account(
@@ -195,7 +218,13 @@ pub struct PlaceBet<'info> {
     )]
     /// CHECK:
     pub fee_vault: UncheckedAccount<'info>,
-    #[account(mut)]
+    #[account(
+        init,
+        payer = bettor,
+        seeds = [b"nft_mint", bettor.key().as_ref(), bet_pool.key().as_ref()],
+        bump,
+        space = 82
+    )]
     pub nft_mint: Account<'info, Mint>,
     #[account(mut)]
     pub user_ata: Account<'info, TokenAccount>,
@@ -251,7 +280,7 @@ pub struct WithdrawFees<'info> {
 #[account]
 pub struct BetPool {
     pub fixture_id: u64,
-    pub sport_name: String,
+    pub sport_name: [u8; 32],
     pub player_id: Pubkey,
     pub stat_line: u32,
     pub betting_deadline: i64,

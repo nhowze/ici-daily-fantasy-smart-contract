@@ -1,0 +1,2 @@
+json_rpc_url: https://api.devnet.solana.com
+keypair_path: /root/.config/solana/id.json
