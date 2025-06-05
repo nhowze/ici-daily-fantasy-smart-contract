@@ -110,6 +110,75 @@ const programId = new PublicKey("NEW_PROGRAM_ID_HERE");
 
 ---
 
+## 🚀 Script Usage — Host vs Container
+
+---
+
+### Host Scripts (run from your host terminal)
+
+| Script | Purpose |
+|--------|---------|
+| `docker-build.sh` | Build Docker image |
+| `build.sh` | Build Anchor program |
+| `deploy.sh` | Build + Deploy to Devnet |
+| `test.sh` | Run tests |
+| `clean.sh` | Clean artifacts |
+| `run.sh` | Open interactive container shell |
+
+---
+
+### Container Scripts (run when inside container)
+
+Once you are inside:
+
+```bash
+./run.sh
+```
+
+Then inside:
+
+```bash
+docker/build.sh
+docker/deploy.sh
+docker/test.sh
+docker/clean.sh
+```
+
+| Script | Purpose |
+|--------|---------|
+| `docker/build.sh` | Build Anchor program |
+| `docker/deploy.sh` | Build + Deploy to Devnet |
+| `docker/test.sh` | Run tests |
+| `docker/clean.sh` | Clean artifacts |
+
+---
+
+### Example Host Workflow:
+
+```bash
+./docker-build.sh        # Only when Dockerfile changes
+./clean.sh
+./build.sh
+./deploy.sh              # New deploy → update Anchor.toml & tests
+./test.sh
+```
+
+---
+
+### Example Container Workflow:
+
+```bash
+./run.sh                 # Open container shell
+
+# Inside container:
+docker/clean.sh
+docker/build.sh
+docker/deploy.sh
+docker/test.sh
+```
+
+---
+
 ## 3️⃣ Notes / Gotchas
 
 ---
@@ -132,29 +201,6 @@ yarn install
 
 ---
 
-### Common Workflow:
-
-```bash
-./docker-build.sh        # Only when Dockerfile changes
-./clean.sh
-./build.sh
-./deploy.sh              # New deploy → update Anchor.toml & tests
-./test.sh
-```
-
----
-
-That’s it! 🚀 Your project is now ready with:
-
-✅ Solana CLI v2.2.15  
-✅ Anchor CLI v0.31.1  
-✅ Rust 1.79  
-✅ Node.js + Yarn  
-✅ nano  
-✅ Full dev scripts
-
----
-
 ## 4️⃣ Summary of Scripts
 
 | Script | Purpose |
@@ -165,6 +211,10 @@ That’s it! 🚀 Your project is now ready with:
 | `test.sh` | Run tests |
 | `clean.sh` | Clean artifacts |
 | `run.sh` | Interactive shell |
+| `docker/build.sh` | Build Anchor program (inside container) |
+| `docker/deploy.sh` | Build + Deploy to Devnet (inside container) |
+| `docker/test.sh` | Run tests (inside container) |
+| `docker/clean.sh` | Clean artifacts (inside container) |
 
 ---
 
@@ -172,8 +222,9 @@ That’s it! 🚀 Your project is now ready with:
 
 ✅ Always **redeploy** after major Anchor / Solana changes  
 ✅ Always update Program IDs in both `Anchor.toml` + tests  
-✅ If you see `DeclaredProgramIdMismatch` → this is usually because your program ID is stale.
+✅ If you see `DeclaredProgramIdMismatch` → this is usually because your program ID is stale.  
+✅ You can use either **host workflow** or **container workflow** — both are supported!
 
 ---
 
-🎉 That’s it! You now have a fully modern, clean workflow.
+🎉 That’s it! You now have a fully modern, clean workflow with flexible host & container scripts 🚀
