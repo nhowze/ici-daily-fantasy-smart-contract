@@ -2,7 +2,7 @@
 
 echo "🚀 Making docker scripts executable..."
 chmod +x docker/entrypoint.sh
-chmod +x docker/rebuild.sh
+chmod +x docker/build.sh
 chmod +x docker/run.sh
 chmod +x docker/clean.sh
 chmod +x docker/test.sh
