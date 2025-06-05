@@ -15,13 +15,20 @@ RUN apt-get update && apt-get install -y \
     llvm \
     clang \
     lld \
-    protobuf-compiler
+    protobuf-compiler \
+    nano
 
 # Install Rust 1.79
 RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain 1.79.0
 
 # Add Rust to PATH
 ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Install Node.js 18.x and Yarn
+RUN curl -fsSL https://deb.nodesource.com/setup_18.x | bash - && \
+    apt-get install -y nodejs && \
+    npm install --global yarn && \
+    node --version && npm --version && yarn --version
 
 # Install Solana CLI v2.2.15 from Anza GitHub release
 RUN wget https://github.com/anza-xyz/agave/releases/download/v2.2.15/solana-release-x86_64-unknown-linux-gnu.tar.bz2 && \

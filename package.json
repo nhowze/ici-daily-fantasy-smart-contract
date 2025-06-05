@@ -24,6 +24,7 @@
     "typescript": "^5.1.6"
   },
   "resolutions": {
+  "bn.js": "5.2.1",
   "@solana/web3.js": "1.68.0",
   "rpc-websockets": "7.11.2",
   "@solana/buffer-layout-utils": "0.1.1"
