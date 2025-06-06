@@ -1,5 +1,6 @@
 [workspace]
 members = ["programs/fantasy_sports"]
+resolver = "2"
 
 [workspace.package]
 edition = "2021"

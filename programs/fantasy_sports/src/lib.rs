@@ -1,7 +1,7 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{self, Mint, TokenAccount, Token, MintTo, InitializeMint};
+use anchor_spl::token::{self, Mint, Token, TokenAccount, MintTo};
 
-declare_id!("2yj1FY4Q7TPL3x5Zyuu8PhKv89A9QTGm5pJdDrbNs9My");
+declare_id!("4gUqFwJxDDQsgd3qhoGhx42nJo9QHszXy6RdN53AVzjp");
 
 pub const ROYALTY_BPS: u16 = 250;
 pub const DISCRIMINATOR_SIZE: usize = 8;
@@ -25,7 +25,6 @@ pub mod fantasy_sports {
         let bet_pool = &mut ctx.accounts.bet_pool;
         bet_pool.fixture_id = fixture_id;
 
-        // Safe copy — prevents panic if sport_name.len() > 32
         let mut name_bytes = [0u8; 32];
         let name_slice = sport_name.as_bytes();
         let copy_len = name_slice.len().min(32);
@@ -45,7 +44,12 @@ pub mod fantasy_sports {
         Ok(())
     }
 
-    pub fn place_bet(ctx: Context<PlaceBet>, amount: u64, pick_side: bool) -> Result<()> {
+    pub fn place_bet(
+        ctx: Context<PlaceBet>,
+        amount: u64,
+        pick_side: bool,
+        uri: String, // future proof
+    ) -> Result<()> {
         let bet_pool = &mut ctx.accounts.bet_pool;
         let user_pick = &mut ctx.accounts.user_pick;
 
@@ -54,6 +58,7 @@ pub mod fantasy_sports {
             ErrorCode::BettingClosed
         );
 
+        // 5% fee
         let platform_fee = amount * 500 / 10000;
         let pool_amount = amount - platform_fee;
 
@@ -79,42 +84,34 @@ pub mod fantasy_sports {
             bet_pool.under_total += pool_amount;
         }
 
-        let mint = &ctx.accounts.nft_mint;
-        let token_program = &ctx.accounts.token_program;
-        let mint_authority = &ctx.accounts.mint_authority;
-
-        token::initialize_mint(
-            CpiContext::new(
-                token_program.to_account_info(),
-                InitializeMint {
-                    mint: mint.to_account_info(),
-                    rent: ctx.accounts.rent.to_account_info(),
-                },
-            ),
-            0,
-            &mint_authority.key(),
-            Some(&mint_authority.key()),
-        )?;
+        // Mint NFT
+        let mint_bump = ctx.bumps.nft_mint;
+        let mint_auth_bump = ctx.bumps.mint_authority;
+        let signer_seeds: &[&[&[u8]]] = &[&[
+            b"mint_authority",
+            &[mint_auth_bump],
+        ]];
 
         token::mint_to(
-            CpiContext::new(
-                token_program.to_account_info(),
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
                 MintTo {
-                    mint: mint.to_account_info(),
+                    mint: ctx.accounts.nft_mint.to_account_info(),
                     to: ctx.accounts.user_ata.to_account_info(),
-                    authority: mint_authority.to_account_info(),
+                    authority: ctx.accounts.mint_authority.to_account_info(),
                 },
-            )
-            .with_signer(&[&[b"mint_authority", &[ctx.bumps.mint_authority]]]),
+                signer_seeds,
+            ),
             1,
         )?;
 
+        // Save user pick
         user_pick.owner = ctx.accounts.bettor.key();
         user_pick.bet_amount = amount;
         user_pick.pick_side = pick_side;
         user_pick.pool = bet_pool.key();
         user_pick.claimed = false;
-        user_pick.mint = mint.key();
+        user_pick.mint = ctx.accounts.nft_mint.key();
         user_pick.bump = ctx.bumps.user_pick;
 
         Ok(())
@@ -174,6 +171,7 @@ pub mod fantasy_sports {
     }
 }
 
+// CONTEXTS
 
 #[derive(Accounts)]
 #[instruction(fixture_id: u64, sport_name: String, player_id: Pubkey, stat_line: u32)]
@@ -216,26 +214,21 @@ pub struct PlaceBet<'info> {
         seeds = [b"fee_vault", bet_pool.key().as_ref()],
         bump
     )]
-    /// CHECK:
-    pub fee_vault: UncheckedAccount<'info>,
+    pub fee_vault: SystemAccount<'info>,
     #[account(
-        init,
-        payer = bettor,
-        seeds = [b"nft_mint", bettor.key().as_ref(), bet_pool.key().as_ref()],
-        bump,
-        space = 82
+        mut,
+        seeds = [b"mint", user_pick.key().as_ref()],
+        bump
     )]
     pub nft_mint: Account<'info, Mint>,
+    #[account(
+        seeds = [b"mint_authority"],
+        bump
+    )]
+    /// CHECK: safe mint authority PDA
+    pub mint_authority: UncheckedAccount<'info>,
     #[account(mut)]
     pub user_ata: Account<'info, TokenAccount>,
-    #[account(seeds = [b"mint_authority"], bump)]
-    /// CHECK:
-    pub mint_authority: UncheckedAccount<'info>,
-    /// CHECK:
-    #[account(mut)]
-    pub metadata_account: UncheckedAccount<'info>,
-    /// CHECK:
-    pub metadata_program: UncheckedAccount<'info>,
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
     pub rent: Sysvar<'info, Rent>,
@@ -276,6 +269,8 @@ pub struct WithdrawFees<'info> {
     #[account(mut)]
     pub recipient: SystemAccount<'info>,
 }
+
+// STATE
 
 #[account]
 pub struct BetPool {
@@ -322,8 +317,6 @@ pub enum ErrorCode {
     PoolNotSettled,
     #[msg("This pick has already been claimed.")]
     AlreadyClaimed,
-    #[msg("Required bump seed is missing.")]
-    MissingBump,
     #[msg("Invalid fee vault PDA")]
     InvalidFeeVault,
 }

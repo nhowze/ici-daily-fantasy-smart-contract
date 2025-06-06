@@ -5,11 +5,15 @@ members = ["programs/fantasy_sports"]
 anchor_version = "0.31.1"
 
 [programs.devnet]
-fantasy_sports = "2yj1FY4Q7TPL3x5Zyuu8PhKv89A9QTGm5pJdDrbNs9My"
+fantasy_sports = "4gUqFwJxDDQsgd3qhoGhx42nJo9QHszXy6RdN53AVzjp"
 
 [programs.localnet]
-fantasy_sports = "2yj1FY4Q7TPL3x5Zyuu8PhKv89A9QTGm5pJdDrbNs9My"
+fantasy_sports = "4gUqFwJxDDQsgd3qhoGhx42nJo9QHszXy6RdN53AVzjp"
 
 [provider]
 cluster = "devnet"
 wallet = "~/.config/solana/id.json"
+
+[scripts]
+test = "yarn mocha -r ts-node/register tests/**/*.ts"
+
