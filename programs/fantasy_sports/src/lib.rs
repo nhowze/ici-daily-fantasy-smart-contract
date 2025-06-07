@@ -11,12 +11,10 @@ pub fn size_of<T>() -> usize {
     std::mem::size_of::<T>() + DISCRIMINATOR_SIZE
 }
 
-//
 // CONTEXTS FIRST
-//
 
 #[derive(Accounts)]
-#[instruction(fixture_id: u64, sport_name: String, player_id: Pubkey, stat_line: u32)]
+#[instruction(fixture_id: u64, sport_name: String, player_id: Pubkey, stat_name: String, stat_line: u32)]
 pub struct InitializeBetPool<'info> {
     #[account(
         init,
@@ -24,6 +22,7 @@ pub struct InitializeBetPool<'info> {
             b"bet_pool",
             fixture_id.to_le_bytes().as_ref(),
             player_id.as_ref(),
+            stat_name.as_bytes(),
             &stat_line.to_le_bytes()
         ],
         bump,
@@ -36,6 +35,7 @@ pub struct InitializeBetPool<'info> {
     pub admin: Signer<'info>,
     pub system_program: Program<'info, System>,
 }
+
 
 #[derive(Accounts)]
 pub struct PlaceBet<'info> {
@@ -73,7 +73,7 @@ pub struct PlaceBet<'info> {
     pub nft_mint: Account<'info, Mint>,
 
     #[account(mut)]
-    pub user_ata: Account<'info, TokenAccount>,  // <-- SAFE version for 0.31.1
+    pub user_ata: Account<'info, TokenAccount>,
 
     pub token_program: Program<'info, Token>,
     pub associated_token_program: Program<'info, AssociatedToken>,
@@ -132,34 +132,42 @@ pub mod fantasy_sports {
     use super::*;
 
     pub fn initialize_bet_pool(
-        ctx: Context<InitializeBetPool>,
-        fixture_id: u64,
-        sport_name: String,
-        player_id: Pubkey,
-        stat_line: u32,
-        betting_deadline: i64,
-    ) -> Result<()> {
-        let bet_pool = &mut ctx.accounts.bet_pool;
-        bet_pool.fixture_id = fixture_id;
+    ctx: Context<InitializeBetPool>,
+    fixture_id: u64,
+    sport_name: String,
+    player_id: Pubkey,
+    stat_name: String,
+    stat_line: u32,
+    betting_deadline: i64,
+) -> Result<()> {
+    let bet_pool = &mut ctx.accounts.bet_pool;
+    bet_pool.fixture_id = fixture_id;
 
-        let mut name_bytes = [0u8; 32];
-        let name_slice = sport_name.as_bytes();
-        let copy_len = name_slice.len().min(32);
-        name_bytes[..copy_len].copy_from_slice(&name_slice[..copy_len]);
-        bet_pool.sport_name = name_bytes;
+    let mut sport_bytes = [0u8; 32];
+    let sport_slice = sport_name.as_bytes();
+    let sport_copy_len = sport_slice.len().min(32);
+    sport_bytes[..sport_copy_len].copy_from_slice(&sport_slice[..sport_copy_len]);
+    bet_pool.sport_name = sport_bytes;
 
-        bet_pool.player_id = player_id;
-        bet_pool.stat_line = stat_line;
-        bet_pool.betting_deadline = betting_deadline;
-        bet_pool.over_total = 0;
-        bet_pool.under_total = 0;
-        bet_pool.fee_collected = 0;
-        bet_pool.result = Outcome::Pending;
-        bet_pool.settled = false;
-        bet_pool.authority = ctx.accounts.admin.key();
-        bet_pool.version = 1;
-        Ok(())
-    }
+    let mut stat_bytes = [0u8; 32];
+    let stat_slice = stat_name.as_bytes();
+    let stat_copy_len = stat_slice.len().min(32);
+    stat_bytes[..stat_copy_len].copy_from_slice(&stat_slice[..stat_copy_len]);
+    bet_pool.stat_name = stat_bytes;
+
+    bet_pool.player_id = player_id;
+    bet_pool.stat_line = stat_line;
+    bet_pool.betting_deadline = betting_deadline;
+    bet_pool.over_total = 0;
+    bet_pool.under_total = 0;
+    bet_pool.fee_collected = 0;
+    bet_pool.result = Outcome::Pending;
+    bet_pool.settled = false;
+    bet_pool.authority = ctx.accounts.admin.key();
+    bet_pool.version = 1;
+    Ok(())
+}
+
 
     pub fn place_bet(
         ctx: Context<PlaceBet>,
@@ -287,15 +295,14 @@ pub mod fantasy_sports {
     }
 }
 
-//
 // STATE
-//
 
 #[account]
 pub struct BetPool {
     pub fixture_id: u64,
     pub sport_name: [u8; 32],
     pub player_id: Pubkey,
+    pub stat_name: [u8; 32],  // <--- NEW FIELD
     pub stat_line: u32,
     pub betting_deadline: i64,
     pub over_total: u64,
