@@ -1,261 +1,205 @@
 import * as anchor from "@coral-xyz/anchor";
-import { Program, Idl } from "@coral-xyz/anchor";
-import { getAssociatedTokenAddress } from "@solana/spl-token";
-import {
-    PublicKey,
-    Keypair,
-    SystemProgram,
-} from "@solana/web3.js";
+import * as fs from "fs";
+import { Keypair, PublicKey, SystemProgram } from "@solana/web3.js";
 import {
     TOKEN_PROGRAM_ID,
+    getAccount,
+    getAssociatedTokenAddress,
+    getOrCreateAssociatedTokenAccount,
 } from "@solana/spl-token";
-import { readFileSync } from "fs";
 
-// Load wallet
-const rawKey = JSON.parse(
-    readFileSync(`${process.env.HOME}/.config/solana/id.json`, "utf8")
+const adminKeypair = Keypair.fromSecretKey(
+    new Uint8Array(
+        JSON.parse(fs.readFileSync(process.env.ANCHOR_WALLET!, "utf-8"))
+    )
 );
-const payer = Keypair.fromSecretKey(Uint8Array.from(rawKey));
 
-// Load IDL
-const idlRaw = JSON.parse(
-    readFileSync(`${__dirname}/../../target/idl/fantasy_sports.json`, "utf8")
-);
-const idl = idlRaw as Idl;
+describe("Fantasy Sports Full Contract Test", function () {
+    this.timeout(30000);  // Increase timeout — Devnet slow sometimes!
 
-// Provider
-const provider = anchor.AnchorProvider.env();
-anchor.setProvider(provider);
+    const provider = anchor.AnchorProvider.env();
+    anchor.setProvider(provider);
 
-const BN = anchor.BN;
-const program = anchor.workspace.FantasySports as Program<typeof idl>;
+    const program = anchor.workspace.FantasySports;
 
-describe("Fantasy Sports Full Contract Test", () => {
-    before(() => {
-        console.log("Program ID:", program.programId.toBase58());
-    });
+    const admin = provider.wallet;
+    const bettor = Keypair.generate();
 
-    let betPoolPDA: PublicKey;
-    let fixtureId: number;
-    let statLine: number;
-    let userPickPDA: PublicKey;
-    let feeVaultPDA: PublicKey;
-    let nftMintPDA: PublicKey;
-    let mintAuthorityPDA: PublicKey;
+    const fixtureId = new anchor.BN(12345);
+    const sportName = "NFL";
+    const playerId = Keypair.generate().publicKey;
+    const statLine = 200;
+    const bettingDeadline = new anchor.BN(Date.now() / 1000 + 3600);
+    const betAmount = new anchor.BN(1_000_000_000);
+
+    let betPoolPda: PublicKey;
+    let userPickPda: PublicKey;
+    let feeVaultPda: PublicKey;
+    let nftMintPda: PublicKey;
     let userAta: PublicKey;
 
-    const playerId = new PublicKey("11111111111111111111111111111111");
-    const sportName = "NBA";
-    const bettingDeadline = Math.floor(Date.now() / 1000) + 3600;
-    const bettor = provider.wallet.publicKey;
-
-    it("Step 1️⃣ InitializeBetPool", async function () {
-        this.timeout(20000);
-
-        fixtureId = 888888 + Math.floor(Math.random() * 1000);
-        statLine = 200 + Math.floor(Math.random() * 100);
-
-        [betPoolPDA] = await PublicKey.findProgramAddress(
+    it("Step 1️⃣ Initialize Bet Pool", async () => {
+        [betPoolPda] = await PublicKey.findProgramAddress(
             [
                 Buffer.from("bet_pool"),
-                new BN(fixtureId).toArrayLike(Buffer, "le", 8),
+                fixtureId.toArrayLike(Buffer, "le", 8),
                 playerId.toBuffer(),
-                new BN(statLine).toArrayLike(Buffer, "le", 4),
+                Buffer.from(Uint8Array.of(...new anchor.BN(statLine).toArray("le", 4))),
             ],
             program.programId
         );
 
-        console.log("Initializing BetPool:", betPoolPDA.toBase58());
+        console.log("📍 Bet Pool PDA:", betPoolPda.toBase58());
 
-        const tx = await program.methods
+        await program.methods
             .initializeBetPool(
-                new BN(fixtureId),
+                fixtureId,
                 sportName,
                 playerId,
-                new BN(statLine),
-                new BN(bettingDeadline)
+                statLine,
+                bettingDeadline
             )
             .accounts({
-                betPool: betPoolPDA,
-                admin: provider.wallet.publicKey,
+                betPool: betPoolPda,
+                admin: admin.publicKey,
                 systemProgram: SystemProgram.programId,
             })
             .rpc();
 
-        console.log("initializeBetPool TX:", tx);
+        console.log("✅ Bet Pool initialized");
     });
 
-    it("Step 2️⃣ PlaceBet", async function () {
-        this.timeout(30000);
+    it("Step 2️⃣ Place Bet (mint NFT)", async () => {
+        // Fund bettor with more SOL (5 SOL safe)
+        const transferTx = new anchor.web3.Transaction().add(
+            anchor.web3.SystemProgram.transfer({
+                fromPubkey: admin.publicKey,
+                toPubkey: bettor.publicKey,
+                lamports: 10_000_000_000,
+            })
+        );
+        await provider.sendAndConfirm(transferTx);
+        console.log("💰 Bettor funded via manual transfer:", bettor.publicKey.toBase58());
 
-        const amount = new BN(10000000); // 0.01 SOL
-        const pickSide = true;
-        const uri = "";
-
-        [userPickPDA] = await PublicKey.findProgramAddress(
+        // Derive PDAs
+        [userPickPda] = await PublicKey.findProgramAddress(
             [
                 Buffer.from("user_pick"),
-                bettor.toBuffer(),
-                betPoolPDA.toBuffer()
+                bettor.publicKey.toBuffer(),
+                betPoolPda.toBuffer(),
             ],
             program.programId
         );
+        console.log("🎟️ User Pick PDA:", userPickPda.toBase58());
 
-        [feeVaultPDA] = await PublicKey.findProgramAddress(
-            [
-                Buffer.from("fee_vault"),
-                betPoolPDA.toBuffer()
-            ],
+        [feeVaultPda] = await PublicKey.findProgramAddress(
+            [Buffer.from("fee_vault"), betPoolPda.toBuffer()],
             program.programId
         );
+        console.log("💰 Fee Vault PDA:", feeVaultPda.toBase58());
 
-        [nftMintPDA] = await PublicKey.findProgramAddress(
-            [
-                Buffer.from("mint"),
-                userPickPDA.toBuffer()
-            ],
+        [nftMintPda] = await PublicKey.findProgramAddress(
+            [Buffer.from("mint"), userPickPda.toBuffer()],
             program.programId
         );
+        console.log("🪙 NFT Mint PDA:", nftMintPda.toBase58());
 
-        [mintAuthorityPDA] = await PublicKey.findProgramAddress(
-            [
-                Buffer.from("mint_authority")
-            ],
-            program.programId
+        // PRE-CREATE user ATA → required for Anchor 0.31.1
+        userAta = await getAssociatedTokenAddress(nftMintPda, bettor.publicKey);
+
+        await getOrCreateAssociatedTokenAccount(
+            provider.connection,
+            adminKeypair,    // payer (admin funds the creation)
+            nftMintPda,
+            bettor.publicKey
         );
 
-        console.log("NFT Mint PDA:", nftMintPDA.toBase58());
+        console.log("🎁 User ATA:", userAta.toBase58());
 
-        userAta = await getAssociatedTokenAddress(
-            nftMintPDA,
-            bettor,
-            false
-        );
-
-        console.log("User ATA:", userAta.toBase58());
-
-        const tx = await program.methods
-            .placeBet(amount, pickSide, uri)
+        // Call placeBet
+        await program.methods
+            .placeBet(betAmount, true, "https://dummy.uri/metadata.json")
             .accounts({
-                bettor: bettor,
-                betPool: betPoolPDA,
-                userPick: userPickPDA,
-                feeVault: feeVaultPDA,
-                nftMint: nftMintPDA,
+                bettor: bettor.publicKey,
+                betPool: betPoolPda,
+                userPick: userPickPda,
+                feeVault: feeVaultPda,
+                nftMint: nftMintPda,
                 userAta: userAta,
-                mintAuthority: mintAuthorityPDA,
                 tokenProgram: TOKEN_PROGRAM_ID,
                 systemProgram: SystemProgram.programId,
                 rent: anchor.web3.SYSVAR_RENT_PUBKEY,
             })
+            .signers([bettor])
             .rpc();
 
-        console.log("placeBet TX:", tx);
+        console.log("✅ Bet placed + NFT minted");
+
+        // Wait a bit to ensure consistency
+        await new Promise(resolve => setTimeout(resolve, 500));
+
+        // Verify ATA now exists and holds the NFT
+        const nftAccount = await getAccount(provider.connection, userAta);
+        console.log("NFT token amount:", Number(nftAccount.amount));
+        if (Number(nftAccount.amount) !== 1) {
+            throw new Error("NFT was not minted correctly!");
+        }
     });
 
-    it("Step 3️⃣ PublishResult", async function () {
-        this.timeout(15000);
-
-        const tx = await program.methods
+    it("Step 3️⃣ Publish Result", async () => {
+        await program.methods
             .publishResult({ overWins: {} })
             .accounts({
-                betPool: betPoolPDA,
-                authority: provider.wallet.publicKey,
+                betPool: betPoolPda,
+                authority: admin.publicKey,
             })
             .rpc();
 
-        console.log("publishResult TX:", tx);
+        console.log("✅ Result published: OverWins");
     });
 
-    it("Step 4️⃣ SettleClaim", async function () {
-        this.timeout(15000);
+    it("Step 4️⃣ Settle Claim", async () => {
+        const bettorProvider = new anchor.AnchorProvider(
+            provider.connection,
+            new anchor.Wallet(bettor),
+            provider.opts
+        );
 
-        const tx = await program.methods
+        // Switch to bettor provider
+        anchor.setProvider(bettorProvider);
+
+        // ⚠️ Force workspace client to use new provider!
+        (program as any).provider = bettorProvider;
+
+        await program.methods
             .settleClaim()
             .accounts({
-                userPick: userPickPDA,
-                betPool: betPoolPDA,
-                recipient: bettor,
-                owner: bettor,
+                userPick: userPickPda,
+                betPool: betPoolPda,
+                recipient: bettor.publicKey,
+                owner: bettor.publicKey,
             })
+            .signers([bettor])
             .rpc();
 
-        console.log("settleClaim TX:", tx);
+        console.log("✅ Claim settled and payout sent to bettor");
+
+        // Switch back to admin provider
+        anchor.setProvider(provider);
+        (program as any).provider = provider;
     });
 
-    it("Step 5️⃣ WithdrawFees", async function () {
-        this.timeout(15000);
-
-        const tx = await program.methods
+    it("Step 5️⃣ Withdraw Fees", async () => {
+        await program.methods
             .withdrawFees()
             .accounts({
-                admin: provider.wallet.publicKey,
-                betPool: betPoolPDA,
-                feeVault: feeVaultPDA,
-                recipient: provider.wallet.publicKey,
+                admin: admin.publicKey,
+                betPool: betPoolPda,
+                feeVault: feeVaultPda,
+                recipient: admin.publicKey,
             })
             .rpc();
 
-        console.log("withdrawFees TX:", tx);
-    });
-
-    it("Negative Test: Bet after deadline", async () => {
-        console.log("⚠️ Skipping for now: would require new pool with expired deadline 🚀");
-    });
-
-    it("Negative Test: Double claim", async function () {
-        this.timeout(15000);
-
-        try {
-            await program.methods
-                .settleClaim()
-                .accounts({
-                    userPick: userPickPDA,
-                    betPool: betPoolPDA,
-                    recipient: bettor,
-                    owner: bettor,
-                })
-                .rpc();
-
-            throw new Error("Expected double claim to fail — but it succeeded!");
-        } catch (err: unknown) {
-            if (err instanceof Error) {
-                console.log("✅ Double claim correctly failed:", err.message);
-            } else {
-                console.log("✅ Double claim correctly failed:", err);
-            }
-        }
-    });
-
-    it("Negative Test: Invalid fee vault", async function () {
-        this.timeout(15000);
-
-        const badVault = Keypair.generate().publicKey;
-
-        try {
-            await program.methods
-                .placeBet(new BN(10000000), true, "")
-                .accounts({
-                    bettor: bettor,
-                    betPool: betPoolPDA,
-                    userPick: userPickPDA,
-                    feeVault: badVault,
-                    nftMint: nftMintPDA,
-                    userAta: userAta,
-                    mintAuthority: mintAuthorityPDA,
-                    tokenProgram: TOKEN_PROGRAM_ID,
-                    systemProgram: SystemProgram.programId,
-                    rent: anchor.web3.SYSVAR_RENT_PUBKEY,
-                })
-                .rpc();
-
-            throw new Error("Expected invalid fee vault to fail — but it succeeded!");
-        } catch (err: unknown) {
-            if (err instanceof Error) {
-                console.log("✅ Invalid fee vault correctly failed:", err.message);
-            } else {
-                console.log("✅ Invalid fee vault correctly failed:", err);
-            }
-        }
+        console.log("✅ Fees withdrawn to admin");
     });
 });

@@ -1,5 +1,6 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Mint, Token, TokenAccount, MintTo};
+use anchor_spl::associated_token::AssociatedToken;
 
 declare_id!("4gUqFwJxDDQsgd3qhoGhx42nJo9QHszXy6RdN53AVzjp");
 
@@ -9,6 +10,122 @@ pub const DISCRIMINATOR_SIZE: usize = 8;
 pub fn size_of<T>() -> usize {
     std::mem::size_of::<T>() + DISCRIMINATOR_SIZE
 }
+
+//
+// CONTEXTS FIRST
+//
+
+#[derive(Accounts)]
+#[instruction(fixture_id: u64, sport_name: String, player_id: Pubkey, stat_line: u32)]
+pub struct InitializeBetPool<'info> {
+    #[account(
+        init,
+        seeds = [
+            b"bet_pool",
+            fixture_id.to_le_bytes().as_ref(),
+            player_id.as_ref(),
+            &stat_line.to_le_bytes()
+        ],
+        bump,
+        payer = admin,
+        space = size_of::<BetPool>()
+    )]
+    pub bet_pool: Account<'info, BetPool>,
+
+    #[account(mut)]
+    pub admin: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct PlaceBet<'info> {
+    #[account(mut)]
+    pub bettor: Signer<'info>,
+
+    #[account(mut)]
+    pub bet_pool: Account<'info, BetPool>,
+
+    #[account(
+        init,
+        seeds = [b"user_pick", bettor.key().as_ref(), bet_pool.key().as_ref()],
+        bump,
+        payer = bettor,
+        space = size_of::<UserPick>()
+    )]
+    pub user_pick: Account<'info, UserPick>,
+
+    #[account(
+        mut,
+        seeds = [b"fee_vault", bet_pool.key().as_ref()],
+        bump
+    )]
+    pub fee_vault: SystemAccount<'info>,
+
+    #[account(
+        init,
+        seeds = [b"mint", user_pick.key().as_ref()],
+        bump,
+        payer = bettor,
+        mint::decimals = 0,
+        mint::authority = nft_mint.key(),
+        mint::freeze_authority = nft_mint.key(),
+    )]
+    pub nft_mint: Account<'info, Mint>,
+
+    #[account(mut)]
+    pub user_ata: Account<'info, TokenAccount>,  // <-- SAFE version for 0.31.1
+
+    pub token_program: Program<'info, Token>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
+    pub system_program: Program<'info, System>,
+    pub rent: Sysvar<'info, Rent>,
+}
+
+#[derive(Accounts)]
+pub struct PublishResult<'info> {
+    #[account(mut)]
+    pub bet_pool: Account<'info, BetPool>,
+    pub authority: Signer<'info>,
+}
+
+#[derive(Accounts)]
+pub struct SettleClaim<'info> {
+    #[account(mut, has_one = owner)]
+    pub user_pick: Account<'info, UserPick>,
+
+    #[account(mut)]
+    pub bet_pool: Account<'info, BetPool>,
+
+    #[account(mut)]
+    pub recipient: SystemAccount<'info>,
+
+    /// CHECK:
+    pub owner: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
+pub struct WithdrawFees<'info> {
+    #[account(mut)]
+    pub admin: Signer<'info>,
+
+    #[account(mut)]
+    pub bet_pool: Account<'info, BetPool>,
+
+    #[account(
+        mut,
+        seeds = [b"fee_vault", bet_pool.key().as_ref()],
+        bump
+    )]
+    /// CHECK:
+    pub fee_vault: UncheckedAccount<'info>,
+
+    #[account(mut)]
+    pub recipient: SystemAccount<'info>,
+}
+
+//
+// PROGRAM
+//
 
 #[program]
 pub mod fantasy_sports {
@@ -48,9 +165,12 @@ pub mod fantasy_sports {
         ctx: Context<PlaceBet>,
         amount: u64,
         pick_side: bool,
-        uri: String, // future proof
+        _uri: String,
     ) -> Result<()> {
         let bet_pool = &mut ctx.accounts.bet_pool;
+
+        let user_pick_key = ctx.accounts.user_pick.key();
+
         let user_pick = &mut ctx.accounts.user_pick;
 
         require!(
@@ -58,7 +178,6 @@ pub mod fantasy_sports {
             ErrorCode::BettingClosed
         );
 
-        // 5% fee
         let platform_fee = amount * 500 / 10000;
         let pool_amount = amount - platform_fee;
 
@@ -84,12 +203,10 @@ pub mod fantasy_sports {
             bet_pool.under_total += pool_amount;
         }
 
-        // Mint NFT
-        let mint_bump = ctx.bumps.nft_mint;
-        let mint_auth_bump = ctx.bumps.mint_authority;
         let signer_seeds: &[&[&[u8]]] = &[&[
-            b"mint_authority",
-            &[mint_auth_bump],
+            b"mint",
+            user_pick_key.as_ref(),
+            &[ctx.bumps.nft_mint],
         ]];
 
         token::mint_to(
@@ -98,14 +215,13 @@ pub mod fantasy_sports {
                 MintTo {
                     mint: ctx.accounts.nft_mint.to_account_info(),
                     to: ctx.accounts.user_ata.to_account_info(),
-                    authority: ctx.accounts.mint_authority.to_account_info(),
+                    authority: ctx.accounts.nft_mint.to_account_info(),
                 },
                 signer_seeds,
             ),
             1,
         )?;
 
-        // Save user pick
         user_pick.owner = ctx.accounts.bettor.key();
         user_pick.bet_amount = amount;
         user_pick.pick_side = pick_side;
@@ -171,106 +287,9 @@ pub mod fantasy_sports {
     }
 }
 
-// CONTEXTS
-
-#[derive(Accounts)]
-#[instruction(fixture_id: u64, sport_name: String, player_id: Pubkey, stat_line: u32)]
-pub struct InitializeBetPool<'info> {
-    #[account(
-        init,
-        seeds = [
-            b"bet_pool",
-            fixture_id.to_le_bytes().as_ref(),
-            player_id.as_ref(),
-            &stat_line.to_le_bytes()
-        ],
-        bump,
-        payer = admin,
-        space = size_of::<BetPool>()
-    )]
-    pub bet_pool: Account<'info, BetPool>,
-
-    #[account(mut)]
-    pub admin: Signer<'info>,
-    pub system_program: Program<'info, System>,
-}
-
-#[derive(Accounts)]
-pub struct PlaceBet<'info> {
-    #[account(mut)]
-    pub bettor: Signer<'info>,
-    #[account(mut)]
-    pub bet_pool: Account<'info, BetPool>,
-    #[account(
-        init,
-        seeds = [b"user_pick", bettor.key().as_ref(), bet_pool.key().as_ref()],
-        bump,
-        payer = bettor,
-        space = size_of::<UserPick>()
-    )]
-    pub user_pick: Account<'info, UserPick>,
-    #[account(
-        mut,
-        seeds = [b"fee_vault", bet_pool.key().as_ref()],
-        bump
-    )]
-    pub fee_vault: SystemAccount<'info>,
-    #[account(
-        mut,
-        seeds = [b"mint", user_pick.key().as_ref()],
-        bump
-    )]
-    pub nft_mint: Account<'info, Mint>,
-    #[account(
-        seeds = [b"mint_authority"],
-        bump
-    )]
-    /// CHECK: safe mint authority PDA
-    pub mint_authority: UncheckedAccount<'info>,
-    #[account(mut)]
-    pub user_ata: Account<'info, TokenAccount>,
-    pub token_program: Program<'info, Token>,
-    pub system_program: Program<'info, System>,
-    pub rent: Sysvar<'info, Rent>,
-}
-
-#[derive(Accounts)]
-pub struct PublishResult<'info> {
-    #[account(mut)]
-    pub bet_pool: Account<'info, BetPool>,
-    pub authority: Signer<'info>,
-}
-
-#[derive(Accounts)]
-pub struct SettleClaim<'info> {
-    #[account(mut, has_one = owner)]
-    pub user_pick: Account<'info, UserPick>,
-    #[account(mut)]
-    pub bet_pool: Account<'info, BetPool>,
-    #[account(mut)]
-    pub recipient: SystemAccount<'info>,
-    /// CHECK:
-    pub owner: UncheckedAccount<'info>,
-}
-
-#[derive(Accounts)]
-pub struct WithdrawFees<'info> {
-    #[account(mut)]
-    pub admin: Signer<'info>,
-    #[account(mut)]
-    pub bet_pool: Account<'info, BetPool>,
-    #[account(
-        mut,
-        seeds = [b"fee_vault", bet_pool.key().as_ref()],
-        bump
-    )]
-    /// CHECK:
-    pub fee_vault: UncheckedAccount<'info>,
-    #[account(mut)]
-    pub recipient: SystemAccount<'info>,
-}
-
+//
 // STATE
+//
 
 #[account]
 pub struct BetPool {

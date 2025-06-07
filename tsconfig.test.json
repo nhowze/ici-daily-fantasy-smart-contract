@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "target": "es2022",
+    "resolveJsonModule": true,
+    "esModuleInterop": true,
+    "types": ["mocha", "node"],
+    "allowSyntheticDefaultImports": true
+  },
+  "include": [
+    "tests/**/*.ts"
+  ]
+}
