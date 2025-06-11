@@ -1,8 +1,8 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Mint, Token, TokenAccount, MintTo};
-use anchor_spl::associated_token::AssociatedToken;
+use anchor_spl::associated_token::{self, AssociatedToken, Create};
 
-declare_id!("4gUqFwJxDDQsgd3qhoGhx42nJo9QHszXy6RdN53AVzjp");
+declare_id!("EMijxVq8c7yUTHNA7acNdtJBPU6jqqWcMDxsdowqP4Hb");
 
 pub const ROYALTY_BPS: u16 = 250;
 pub const DISCRIMINATOR_SIZE: usize = 8;
@@ -10,8 +10,6 @@ pub const DISCRIMINATOR_SIZE: usize = 8;
 pub fn size_of<T>() -> usize {
     std::mem::size_of::<T>() + DISCRIMINATOR_SIZE
 }
-
-// CONTEXTS FIRST
 
 #[derive(Accounts)]
 #[instruction(fixture_id: u64, sport_name: String, player_id: Pubkey, stat_name: String, stat_line: u32)]
@@ -35,7 +33,6 @@ pub struct InitializeBetPool<'info> {
     pub admin: Signer<'info>,
     pub system_program: Program<'info, System>,
 }
-
 
 #[derive(Accounts)]
 pub struct PlaceBet<'info> {
@@ -67,13 +64,21 @@ pub struct PlaceBet<'info> {
         bump,
         payer = bettor,
         mint::decimals = 0,
-        mint::authority = nft_mint.key(),
-        mint::freeze_authority = nft_mint.key(),
+        mint::authority = mint_authority,
+        mint::freeze_authority = mint_authority,
     )]
     pub nft_mint: Account<'info, Mint>,
 
+    #[account(
+        seeds = [b"mint", user_pick.key().as_ref()],
+        bump
+    )]
+    /// CHECK: PDA used only as signer
+    pub mint_authority: UncheckedAccount<'info>,
+
+    /// CHECK: ATA will be created on-chain if not exists
     #[account(mut)]
-    pub user_ata: Account<'info, TokenAccount>,
+    pub user_ata: UncheckedAccount<'info>,
 
     pub token_program: Program<'info, Token>,
     pub associated_token_program: Program<'info, AssociatedToken>,
@@ -123,51 +128,48 @@ pub struct WithdrawFees<'info> {
     pub recipient: SystemAccount<'info>,
 }
 
-//
-// PROGRAM
-//
-
 #[program]
 pub mod fantasy_sports {
     use super::*;
 
     pub fn initialize_bet_pool(
-    ctx: Context<InitializeBetPool>,
-    fixture_id: u64,
-    sport_name: String,
-    player_id: Pubkey,
-    stat_name: String,
-    stat_line: u32,
-    betting_deadline: i64,
-) -> Result<()> {
-    let bet_pool = &mut ctx.accounts.bet_pool;
-    bet_pool.fixture_id = fixture_id;
+        ctx: Context<InitializeBetPool>,
+        fixture_id: u64,
+        sport_name: String,
+        player_id: Pubkey,
+        stat_name: String,
+        stat_line: u32,
+        betting_deadline: i64,
+    ) -> Result<()> {
 
-    let mut sport_bytes = [0u8; 32];
-    let sport_slice = sport_name.as_bytes();
-    let sport_copy_len = sport_slice.len().min(32);
-    sport_bytes[..sport_copy_len].copy_from_slice(&sport_slice[..sport_copy_len]);
-    bet_pool.sport_name = sport_bytes;
+msg!("🔧 INIT POOL: fixture={}, stat={}, line={}", fixture_id, stat_name, stat_line);
+    msg!("🏀 Sport: {}", sport_name);
+    msg!("👤 Player ID: {}", player_id);
+    msg!("⏳ Deadline: {}", betting_deadline);
 
-    let mut stat_bytes = [0u8; 32];
-    let stat_slice = stat_name.as_bytes();
-    let stat_copy_len = stat_slice.len().min(32);
-    stat_bytes[..stat_copy_len].copy_from_slice(&stat_slice[..stat_copy_len]);
-    bet_pool.stat_name = stat_bytes;
+        let bet_pool = &mut ctx.accounts.bet_pool;
+        bet_pool.fixture_id = fixture_id;
 
-    bet_pool.player_id = player_id;
-    bet_pool.stat_line = stat_line;
-    bet_pool.betting_deadline = betting_deadline;
-    bet_pool.over_total = 0;
-    bet_pool.under_total = 0;
-    bet_pool.fee_collected = 0;
-    bet_pool.result = Outcome::Pending;
-    bet_pool.settled = false;
-    bet_pool.authority = ctx.accounts.admin.key();
-    bet_pool.version = 1;
-    Ok(())
-}
+        let mut sport_bytes = [0u8; 32];
+        sport_bytes[..sport_name.len().min(32)].copy_from_slice(&sport_name.as_bytes()[..sport_name.len().min(32)]);
+        bet_pool.sport_name = sport_bytes;
 
+        let mut stat_bytes = [0u8; 32];
+        stat_bytes[..stat_name.len().min(32)].copy_from_slice(&stat_name.as_bytes()[..stat_name.len().min(32)]);
+        bet_pool.stat_name = stat_bytes;
+
+        bet_pool.player_id = player_id;
+        bet_pool.stat_line = stat_line;
+        bet_pool.betting_deadline = betting_deadline;
+        bet_pool.over_total = 0;
+        bet_pool.under_total = 0;
+        bet_pool.fee_collected = 0;
+        bet_pool.result = Outcome::Pending;
+        bet_pool.settled = false;
+        bet_pool.authority = ctx.accounts.admin.key();
+        bet_pool.version = 1;
+        Ok(())
+    }
 
     pub fn place_bet(
         ctx: Context<PlaceBet>,
@@ -176,9 +178,7 @@ pub mod fantasy_sports {
         _uri: String,
     ) -> Result<()> {
         let bet_pool = &mut ctx.accounts.bet_pool;
-
         let user_pick_key = ctx.accounts.user_pick.key();
-
         let user_pick = &mut ctx.accounts.user_pick;
 
         require!(
@@ -199,22 +199,39 @@ pub mod fantasy_sports {
             ErrorCode::InvalidFeeVault
         );
 
+        // Transfer SOL to pool and fee vault
         **ctx.accounts.bettor.try_borrow_mut_lamports()? -= amount;
         **ctx.accounts.fee_vault.try_borrow_mut_lamports()? += platform_fee;
         **bet_pool.to_account_info().try_borrow_mut_lamports()? += pool_amount;
 
+        // Update pool totals
         bet_pool.fee_collected += platform_fee;
-
         if pick_side {
             bet_pool.over_total += pool_amount;
         } else {
             bet_pool.under_total += pool_amount;
         }
 
+        // Create ATA on-chain
+        let ata_ctx = CpiContext::new(
+    ctx.accounts.associated_token_program.to_account_info(),
+    Create {
+        payer: ctx.accounts.bettor.to_account_info(),
+        associated_token: ctx.accounts.user_ata.to_account_info(),
+        authority: ctx.accounts.bettor.to_account_info(),
+        mint: ctx.accounts.nft_mint.to_account_info(),
+        system_program: ctx.accounts.system_program.to_account_info(),
+        token_program: ctx.accounts.token_program.to_account_info(),
+    },
+);
+
+        associated_token::create(ata_ctx)?;
+
+        // Mint NFT to ATA
         let signer_seeds: &[&[&[u8]]] = &[&[
             b"mint",
             user_pick_key.as_ref(),
-            &[ctx.bumps.nft_mint],
+            &[ctx.bumps.mint_authority],
         ]];
 
         token::mint_to(
@@ -223,7 +240,7 @@ pub mod fantasy_sports {
                 MintTo {
                     mint: ctx.accounts.nft_mint.to_account_info(),
                     to: ctx.accounts.user_ata.to_account_info(),
-                    authority: ctx.accounts.nft_mint.to_account_info(),
+                    authority: ctx.accounts.mint_authority.to_account_info(),
                 },
                 signer_seeds,
             ),
@@ -295,14 +312,12 @@ pub mod fantasy_sports {
     }
 }
 
-// STATE
-
 #[account]
 pub struct BetPool {
     pub fixture_id: u64,
     pub sport_name: [u8; 32],
     pub player_id: Pubkey,
-    pub stat_name: [u8; 32],  // <--- NEW FIELD
+    pub stat_name: [u8; 32],
     pub stat_line: u32,
     pub betting_deadline: i64,
     pub over_total: u64,
