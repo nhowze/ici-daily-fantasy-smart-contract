@@ -1,15 +1,17 @@
+#![allow(clippy::result_large_err)]
 use anchor_lang::prelude::*;
-use anchor_spl::token::{self, Mint, Token, TokenAccount, MintTo};
-use anchor_spl::associated_token::{self, AssociatedToken, Create};
+use anchor_spl::token::{self, Mint, Token, MintTo};
+use anchor_spl::associated_token::{self, AssociatedToken, Create, get_associated_token_address};
+use anchor_spl::token::spl_token::state::Account as SPLTokenAccount;
+use anchor_lang::solana_program::program_pack::Pack;
+// use mpl_token_metadata::instruction::{create_metadata_accounts_v2, update_metadata_accounts_v2};
+// use mpl_token_metadata::state::{Creator, DataV2};
+ //use mpl_token_metadata::ID as TOKEN_METADATA_PROGRAM_ID;
 
-declare_id!("EMijxVq8c7yUTHNA7acNdtJBPU6jqqWcMDxsdowqP4Hb");
 
-pub const ROYALTY_BPS: u16 = 250;
-pub const DISCRIMINATOR_SIZE: usize = 8;
+ declare_id!("EMijxVq8c7yUTHNA7acNdtJBPU6jqqWcMDxsdowqP4Hb");
 
-pub fn size_of<T>() -> usize {
-    std::mem::size_of::<T>() + DISCRIMINATOR_SIZE
-}
+
 
 #[derive(Accounts)]
 #[instruction(fixture_id: u64, sport_name: String, player_id: Pubkey, stat_name: String, stat_line: u32)]
@@ -102,11 +104,21 @@ pub struct SettleClaim<'info> {
     pub bet_pool: Account<'info, BetPool>,
 
     #[account(mut)]
-    pub recipient: SystemAccount<'info>,
+    pub recipient: SystemAccount<'info>, // user who owns the NFT
 
-    /// CHECK:
+    /// CHECK: Owner of user_pick before claim
     pub owner: UncheckedAccount<'info>,
+
+    #[account(mut)]
+    pub nft_mint: Account<'info, Mint>,
+
+    /// CHECK: manually verified ATA
+    #[account(mut)]
+    pub nft_ata: AccountInfo<'info>,
+
+    pub token_program: Program<'info, Token>,
 }
+
 
 #[derive(Accounts)]
 pub struct WithdrawFees<'info> {
@@ -128,191 +140,21 @@ pub struct WithdrawFees<'info> {
     pub recipient: SystemAccount<'info>,
 }
 
-#[program]
-pub mod fantasy_sports {
-    use super::*;
+pub const ROYALTY_BPS: u16 = 250;
+pub const DISCRIMINATOR_SIZE: usize = 8;
 
-    pub fn initialize_bet_pool(
-        ctx: Context<InitializeBetPool>,
-        fixture_id: u64,
-        sport_name: String,
-        player_id: Pubkey,
-        stat_name: String,
-        stat_line: u32,
-        betting_deadline: i64,
-    ) -> Result<()> {
-
-msg!("🔧 INIT POOL: fixture={}, stat={}, line={}", fixture_id, stat_name, stat_line);
-    msg!("🏀 Sport: {}", sport_name);
-    msg!("👤 Player ID: {}", player_id);
-    msg!("⏳ Deadline: {}", betting_deadline);
-
-        let bet_pool = &mut ctx.accounts.bet_pool;
-        bet_pool.fixture_id = fixture_id;
-
-        let mut sport_bytes = [0u8; 32];
-        sport_bytes[..sport_name.len().min(32)].copy_from_slice(&sport_name.as_bytes()[..sport_name.len().min(32)]);
-        bet_pool.sport_name = sport_bytes;
-
-        let mut stat_bytes = [0u8; 32];
-        stat_bytes[..stat_name.len().min(32)].copy_from_slice(&stat_name.as_bytes()[..stat_name.len().min(32)]);
-        bet_pool.stat_name = stat_bytes;
-
-        bet_pool.player_id = player_id;
-        bet_pool.stat_line = stat_line;
-        bet_pool.betting_deadline = betting_deadline;
-        bet_pool.over_total = 0;
-        bet_pool.under_total = 0;
-        bet_pool.fee_collected = 0;
-        bet_pool.result = Outcome::Pending;
-        bet_pool.settled = false;
-        bet_pool.authority = ctx.accounts.admin.key();
-        bet_pool.version = 1;
-        Ok(())
-    }
-
-    pub fn place_bet(
-        ctx: Context<PlaceBet>,
-        amount: u64,
-        pick_side: bool,
-        _uri: String,
-    ) -> Result<()> {
-        let bet_pool = &mut ctx.accounts.bet_pool;
-        let user_pick_key = ctx.accounts.user_pick.key();
-        let user_pick = &mut ctx.accounts.user_pick;
-
-        require!(
-            Clock::get()?.unix_timestamp < bet_pool.betting_deadline,
-            ErrorCode::BettingClosed
-        );
-
-        let platform_fee = amount * 500 / 10000;
-        let pool_amount = amount - platform_fee;
-
-        let (expected_fee_vault, _) = Pubkey::find_program_address(
-            &[b"fee_vault", bet_pool.key().as_ref()],
-            ctx.program_id,
-        );
-        require_keys_eq!(
-            expected_fee_vault,
-            ctx.accounts.fee_vault.key(),
-            ErrorCode::InvalidFeeVault
-        );
-
-        // Transfer SOL to pool and fee vault
-        **ctx.accounts.bettor.try_borrow_mut_lamports()? -= amount;
-        **ctx.accounts.fee_vault.try_borrow_mut_lamports()? += platform_fee;
-        **bet_pool.to_account_info().try_borrow_mut_lamports()? += pool_amount;
-
-        // Update pool totals
-        bet_pool.fee_collected += platform_fee;
-        if pick_side {
-            bet_pool.over_total += pool_amount;
-        } else {
-            bet_pool.under_total += pool_amount;
-        }
-
-        // Create ATA on-chain
-        let ata_ctx = CpiContext::new(
-    ctx.accounts.associated_token_program.to_account_info(),
-    Create {
-        payer: ctx.accounts.bettor.to_account_info(),
-        associated_token: ctx.accounts.user_ata.to_account_info(),
-        authority: ctx.accounts.bettor.to_account_info(),
-        mint: ctx.accounts.nft_mint.to_account_info(),
-        system_program: ctx.accounts.system_program.to_account_info(),
-        token_program: ctx.accounts.token_program.to_account_info(),
-    },
-);
-
-        associated_token::create(ata_ctx)?;
-
-        // Mint NFT to ATA
-        let signer_seeds: &[&[&[u8]]] = &[&[
-            b"mint",
-            user_pick_key.as_ref(),
-            &[ctx.bumps.mint_authority],
-        ]];
-
-        token::mint_to(
-            CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
-                MintTo {
-                    mint: ctx.accounts.nft_mint.to_account_info(),
-                    to: ctx.accounts.user_ata.to_account_info(),
-                    authority: ctx.accounts.mint_authority.to_account_info(),
-                },
-                signer_seeds,
-            ),
-            1,
-        )?;
-
-        user_pick.owner = ctx.accounts.bettor.key();
-        user_pick.bet_amount = amount;
-        user_pick.pick_side = pick_side;
-        user_pick.pool = bet_pool.key();
-        user_pick.claimed = false;
-        user_pick.mint = ctx.accounts.nft_mint.key();
-        user_pick.bump = ctx.bumps.user_pick;
-
-        Ok(())
-    }
-
-    pub fn publish_result(ctx: Context<PublishResult>, result: Outcome) -> Result<()> {
-        let pool = &mut ctx.accounts.bet_pool;
-        require!(pool.result == Outcome::Pending, ErrorCode::AlreadySettled);
-        pool.result = result;
-        pool.settled = true;
-        Ok(())
-    }
-
-    pub fn settle_claim(ctx: Context<SettleClaim>) -> Result<()> {
-        let pick = &mut ctx.accounts.user_pick;
-        let pool = &mut ctx.accounts.bet_pool;
-
-        require!(pool.settled, ErrorCode::PoolNotSettled);
-        require!(!pick.claimed, ErrorCode::AlreadyClaimed);
-
-        let won = match (pick.pick_side, &pool.result) {
-            (true, Outcome::OverWins) => true,
-            (false, Outcome::UnderWins) => true,
-            _ => false,
-        };
-
-        if won {
-            let total_winner_pool = if pick.pick_side {
-                pool.over_total
-            } else {
-                pool.under_total
-            };
-            let total_loser_pool = if pick.pick_side {
-                pool.under_total
-            } else {
-                pool.over_total
-            };
-
-            let payout = pick.bet_amount * total_loser_pool / total_winner_pool;
-
-            **pool.to_account_info().try_borrow_mut_lamports()? -= payout;
-            **ctx.accounts.recipient.try_borrow_mut_lamports()? += payout;
-        }
-
-        pick.claimed = true;
-        Ok(())
-    }
-
-    pub fn withdraw_fees(ctx: Context<WithdrawFees>) -> Result<()> {
-        let pool = &mut ctx.accounts.bet_pool;
-        let amount = pool.fee_collected;
-        pool.fee_collected = 0;
-
-        **ctx.accounts.fee_vault.try_borrow_mut_lamports()? -= amount;
-        **ctx.accounts.recipient.try_borrow_mut_lamports()? += amount;
-        Ok(())
-    }
+pub fn size_with_discriminator<T>() -> usize {
+    std::mem::size_of::<T>() + DISCRIMINATOR_SIZE
 }
 
-#[account]
+pub fn round_stat_line(value: u32) -> u32 {
+    let float_val = value as f64 / 10.0;
+    let rounded = float_val.round();
+    let adjusted = if rounded % 2.0 == 0.0 { rounded - 0.5 } else { rounded + 0.5 };
+    (adjusted * 10.0).round() as u32
+}
+
+#[account] // #[derive(Debug, AnchorSerialize, AnchorDeserialize)]  replace with later #[account]
 pub struct BetPool {
     pub fixture_id: u64,
     pub sport_name: [u8; 32],
@@ -358,6 +200,171 @@ pub enum ErrorCode {
     PoolNotSettled,
     #[msg("This pick has already been claimed.")]
     AlreadyClaimed,
-    #[msg("Invalid fee vault PDA")]
+    #[msg("Invalid fee vault PDA.")]
     InvalidFeeVault,
+    #[msg("Invalid NFT ATA: does not match expected associated token account.")]
+    InvalidNFTATA,
+    #[msg("NFT ATA does not contain the NFT.")]
+    InvalidNFTBalance,
+    #[msg("NFT token account does not match expected mint.")]
+    InvalidNFTMint,
+    #[msg("NFT token account owner does not match recipient.")]
+    InvalidNFTOwner,
+}
+
+
+
+
+
+pub fn place_bet(ctx: Context<PlaceBet>) -> Result<()> {
+    let bump = ctx.bumps.mint_authority;
+    let user_key = ctx.accounts.user_pick.key();
+    let seeds = &[b"mint", user_key.as_ref(), &[bump]];
+
+    associated_token::create(CpiContext::new(
+        ctx.accounts.associated_token_program.to_account_info(),
+        Create {
+            payer: ctx.accounts.bettor.to_account_info(),
+            associated_token: ctx.accounts.user_ata.to_account_info(),
+            authority: ctx.accounts.bettor.to_account_info(),
+            mint: ctx.accounts.nft_mint.to_account_info(),
+            system_program: ctx.accounts.system_program.to_account_info(),
+            token_program: ctx.accounts.token_program.to_account_info(),
+        },
+    ))?;
+
+    token::mint_to(
+        CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            MintTo {
+                mint: ctx.accounts.nft_mint.to_account_info(),
+                to: ctx.accounts.user_ata.to_account_info(),
+                authority: ctx.accounts.mint_authority.to_account_info(),
+            },
+            &[seeds],
+        ),
+        1,
+    )?;
+
+    // Commented out metadata creation logic
+    /*
+    let metadata_ix = create_metadata_accounts_v2(
+        TOKEN_METADATA_PROGRAM_ID,
+        ctx.accounts.metadata.key(),
+        ctx.accounts.nft_mint.key(),
+        ctx.accounts.mint_authority.key(),
+        ctx.accounts.bettor.key(),
+        ctx.accounts.mint_authority.key(),
+        "Fantasy Pick NFT".to_string(),
+        "PICK".to_string(),
+        format!("https://example.com/nfts/{}_unsettled.json", ctx.accounts.user_pick.key()),
+        Some(vec![Creator {
+            address: ctx.accounts.mint_authority.key(),
+            verified: true,
+            share: 100,
+        }]),
+        ROYALTY_BPS,
+        true,
+        true,
+    );
+
+    invoke_signed(
+        &metadata_ix,
+        &[
+            ctx.accounts.metadata.to_account_info(),
+            ctx.accounts.nft_mint.to_account_info(),
+            ctx.accounts.mint_authority.to_account_info(),
+            ctx.accounts.bettor.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+            ctx.accounts.rent.to_account_info(),
+        ],
+        &[seeds],
+    )?;
+    */
+
+    let pool = &mut ctx.accounts.bet_pool;
+    let pick = &ctx.accounts.user_pick;
+    let fee = pick.bet_amount / 20;
+    pool.fee_collected += fee;
+
+    Ok(())
+}
+
+
+
+pub fn publish_result(ctx: Context<PublishResult>, result: Outcome) -> Result<()> {
+    let pool = &mut ctx.accounts.bet_pool;
+    require!(pool.result == Outcome::Pending, ErrorCode::AlreadySettled);
+    pool.result = result;
+    pool.settled = true;
+    Ok(())
+}
+
+
+
+
+pub fn settle_claim(ctx: Context<SettleClaim>) -> Result<()> {
+    let pick = &mut ctx.accounts.user_pick;
+    let pool = &mut ctx.accounts.bet_pool;
+
+    require!(pool.settled, ErrorCode::PoolNotSettled);
+    require!(!pick.claimed, ErrorCode::AlreadyClaimed);
+
+    // ✅ Check that recipient owns the NFT
+    let expected_ata = get_associated_token_address(
+    &ctx.accounts.recipient.key(),
+    &ctx.accounts.nft_mint.key(),
+);
+
+    require!(ctx.accounts.nft_ata.key() == expected_ata, ErrorCode::InvalidNFTATA);
+
+    // ✅ Load and verify token balance == 1
+    let nft_data = &ctx.accounts.nft_ata.try_borrow_data()?;
+    let token_account = SPLTokenAccount::unpack(&nft_data)?;
+    require!(token_account.amount == 1, ErrorCode::InvalidNFTBalance);
+    require!(token_account.mint == ctx.accounts.nft_mint.key(), ErrorCode::InvalidNFTMint);
+    require!(token_account.owner == ctx.accounts.recipient.key(), ErrorCode::InvalidNFTOwner);
+
+    // ✅ Check win condition
+    let won = match (pick.pick_side, &pool.result) {
+        (true, Outcome::OverWins) => true,
+        (false, Outcome::UnderWins) => true,
+        _ => false,
+    };
+
+    if won {
+        let total_winner_pool = if pick.pick_side {
+            pool.over_total
+        } else {
+            pool.under_total
+        };
+        let total_loser_pool = if pick.pick_side {
+            pool.under_total
+        } else {
+            pool.over_total
+        };
+
+        let payout = pick.bet_amount * total_loser_pool / total_winner_pool;
+
+        **pool.to_account_info().try_borrow_mut_lamports()? -= payout;
+        **ctx.accounts.recipient.to_account_info().try_borrow_mut_lamports()? += payout;
+    }
+
+    // ✅ Mark as claimed and update owner to current holder
+    pick.claimed = true;
+    pick.owner = ctx.accounts.recipient.key();
+
+    Ok(())
+}
+
+
+
+pub fn withdraw_fees(ctx: Context<WithdrawFees>) -> Result<()> {
+    let pool = &mut ctx.accounts.bet_pool;
+    let amount = pool.fee_collected;
+    pool.fee_collected = 0;
+
+    **ctx.accounts.fee_vault.to_account_info().try_borrow_mut_lamports()? -= amount;
+    **ctx.accounts.recipient.to_account_info().try_borrow_mut_lamports()? += amount;
+    Ok(())
 }

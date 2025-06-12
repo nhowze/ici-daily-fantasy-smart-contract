@@ -13,7 +13,7 @@ node_modules/
 yarn.lock
 package-lock.json
 .DS_Store
-
+idl-copy.sh
 # === Anchor & Rust build artifacts ===
 target/
 .anchor/
