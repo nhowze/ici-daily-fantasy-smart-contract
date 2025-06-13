@@ -9,85 +9,139 @@ use anchor_lang::solana_program::program_pack::Pack;
  //use mpl_token_metadata::ID as TOKEN_METADATA_PROGRAM_ID;
 
 
- declare_id!("EMijxVq8c7yUTHNA7acNdtJBPU6jqqWcMDxsdowqP4Hb");
+ declare_id!("3x7u6RMoygDW5nHB8cFk3cdrm3qMsPLgjDPPmchRTEqX");
 
 #[program]
 pub mod fantasy_sports {
     use super::*;
 
-    pub fn place_bet(ctx: Context<PlaceBet>) -> Result<()> {
-        let bump = ctx.bumps.mint_authority;
-        let user_key = ctx.accounts.user_pick.key();
-        let seeds = &[b"mint", user_key.as_ref(), &[bump]];
+    pub fn place_bet(ctx: Context<PlaceBet>, bet_amount: u64, pick_side: bool, sport_name: String) -> Result<()> {
 
-        associated_token::create(CpiContext::new(
-            ctx.accounts.associated_token_program.to_account_info(),
-            Create {
-                payer: ctx.accounts.bettor.to_account_info(),
-                associated_token: ctx.accounts.user_ata.to_account_info(),
-                authority: ctx.accounts.bettor.to_account_info(),
+        let (fee_vault_pda, _) = Pubkey::find_program_address(
+    &[b"fee_vault", ctx.accounts.bet_pool.key().as_ref()],
+    ctx.program_id,
+);
+
+
+    require!(
+        ctx.accounts.fee_vault.key() == fee_vault_pda,
+        ErrorCode::InvalidFeeVault
+    );
+
+    let bump = ctx.bumps.mint_authority;
+    let user_key = ctx.accounts.user_pick.key();
+    let seeds = &[b"mint", user_key.as_ref(), &[bump]];
+
+    // Mint NFT
+    associated_token::create(CpiContext::new(
+        ctx.accounts.associated_token_program.to_account_info(),
+        Create {
+            payer: ctx.accounts.bettor.to_account_info(),
+            associated_token: ctx.accounts.user_ata.to_account_info(),
+            authority: ctx.accounts.bettor.to_account_info(),
+            mint: ctx.accounts.nft_mint.to_account_info(),
+            system_program: ctx.accounts.system_program.to_account_info(),
+            token_program: ctx.accounts.token_program.to_account_info(),
+        },
+    ))?;
+
+    token::mint_to(
+        CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            MintTo {
                 mint: ctx.accounts.nft_mint.to_account_info(),
-                system_program: ctx.accounts.system_program.to_account_info(),
-                token_program: ctx.accounts.token_program.to_account_info(),
+                to: ctx.accounts.user_ata.to_account_info(),
+                authority: ctx.accounts.mint_authority.to_account_info(),
             },
-        ))?;
-
-        token::mint_to(
-            CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
-                MintTo {
-                    mint: ctx.accounts.nft_mint.to_account_info(),
-                    to: ctx.accounts.user_ata.to_account_info(),
-                    authority: ctx.accounts.mint_authority.to_account_info(),
-                },
-                &[seeds],
-            ),
-            1,
-        )?;
-
-        // Commented out metadata creation logic
-        /*
-        let metadata_ix = create_metadata_accounts_v2(
-            TOKEN_METADATA_PROGRAM_ID,
-            ctx.accounts.metadata.key(),
-            ctx.accounts.nft_mint.key(),
-            ctx.accounts.mint_authority.key(),
-            ctx.accounts.bettor.key(),
-            ctx.accounts.mint_authority.key(),
-            "Fantasy Pick NFT".to_string(),
-            "PICK".to_string(),
-            format!("https://example.com/nfts/{}_unsettled.json", ctx.accounts.user_pick.key()),
-            Some(vec![Creator {
-                address: ctx.accounts.mint_authority.key(),
-                verified: true,
-                share: 100,
-            }]),
-            ROYALTY_BPS,
-            true,
-            true,
-        );
-
-        invoke_signed(
-            &metadata_ix,
-            &[
-                ctx.accounts.metadata.to_account_info(),
-                ctx.accounts.nft_mint.to_account_info(),
-                ctx.accounts.mint_authority.to_account_info(),
-                ctx.accounts.bettor.to_account_info(),
-                ctx.accounts.system_program.to_account_info(),
-                ctx.accounts.rent.to_account_info(),
-            ],
             &[seeds],
-        )?;
-        */
+        ),
+        1,
+    )?;
 
-        let pool = &mut ctx.accounts.bet_pool;
-        let pick = &ctx.accounts.user_pick;
-        let fee = pick.bet_amount / 20;
-        pool.fee_collected += fee;
+    // Populate UserPick account
+    let pick = &mut ctx.accounts.user_pick;
+    pick.bet_amount = bet_amount;
+    pick.pick_side = pick_side;
+    pick.owner = ctx.accounts.bettor.key();
+    pick.pool = ctx.accounts.bet_pool.key();
+    pick.claimed = false;
+    pick.mint = ctx.accounts.nft_mint.key();
+    pick.bump = ctx.bumps.user_pick;
 
-        Ok(())
-    }
+    // Store sport_name as [u8; 32]
+    let mut sport_buf = [0u8; 32];
+    let name_bytes = sport_name.as_bytes();
+    let len = name_bytes.len().min(32);
+    sport_buf[..len].copy_from_slice(&name_bytes[..len]);
+    pick.sport_name = sport_buf;
+
+    // Update pool fees
+    let pool = &mut ctx.accounts.bet_pool;
+    let fee = bet_amount / 20;
+    pool.fee_collected += fee;
+
+    Ok(())
+}
+
+//functons
+
+pub fn initialize_bet_pool(
+    ctx: Context<InitializeBetPool>,
+    fixture_id: u64,
+    sport_name: String,
+    player_id: Pubkey,
+    stat_name: String,
+    stat_line: u32,
+) -> Result<()> {
+    // Debug: Log PDA info for fee_vault
+    msg!("🔒 On-chain seed check for fee_vault:");
+    msg!("  fixture_id: {}", fixture_id);
+    msg!("  player_id: {}", player_id);
+    msg!("  stat_name: {}", stat_name);
+    msg!("  stat_line: {}", stat_line);
+
+    let (expected_fee_vault, _) = Pubkey::find_program_address(
+    &[b"fee_vault", ctx.accounts.bet_pool.key().as_ref()],
+    ctx.program_id,
+);
+
+
+    msg!("  On-chain expected fee_vault: {}", expected_fee_vault);
+    msg!("  Incoming fee_vault: {}", ctx.accounts.fee_vault.key());
+
+    require_keys_eq!(expected_fee_vault, ctx.accounts.fee_vault.key(), ErrorCode::InvalidFeeVault);
+
+    let pool = &mut ctx.accounts.bet_pool;
+
+    // Fill in pool data
+    pool.fixture_id = fixture_id;
+
+    let mut sport_buf = [0u8; 32];
+    let name_bytes = sport_name.as_bytes();
+    let len = name_bytes.len().min(32);
+    sport_buf[..len].copy_from_slice(&name_bytes[..len]);
+    pool.sport_name = sport_buf;
+
+    let mut stat_buf = [0u8; 32];
+    let stat_bytes = stat_name.as_bytes();
+    let len = stat_bytes.len().min(32);
+    stat_buf[..len].copy_from_slice(&stat_bytes[..len]);
+    pool.stat_name = stat_buf;
+
+    pool.player_id = player_id;
+    pool.stat_line = stat_line;
+    pool.betting_deadline = 0; // Set appropriately if you have a deadline
+    pool.over_total = 0;
+    pool.under_total = 0;
+    pool.fee_collected = 0;
+    pool.result = Outcome::Pending;
+    pool.settled = false;
+    pool.authority = ctx.accounts.admin.key();
+    pool.version = 1;
+
+    Ok(())
+}
+
 
     pub fn publish_result(ctx: Context<PublishResult>, result: Outcome) -> Result<()> {
         let pool = &mut ctx.accounts.bet_pool;
@@ -166,20 +220,6 @@ pub mod fantasy_sports {
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #[derive(Accounts)]
 #[instruction(fixture_id: u64, sport_name: String, player_id: Pubkey, stat_name: String, stat_line: u32)]
 pub struct InitializeBetPool<'info> {
@@ -187,28 +227,52 @@ pub struct InitializeBetPool<'info> {
         init,
         seeds = [
             b"bet_pool",
-            fixture_id.to_le_bytes().as_ref(),
+            &fixture_id.to_le_bytes(),
             player_id.as_ref(),
             stat_name.as_bytes(),
             &stat_line.to_le_bytes()
         ],
         bump,
         payer = admin,
-        space = size_of::<BetPool>()
+        space = 8 + std::mem::size_of::<BetPool>()
     )]
     pub bet_pool: Account<'info, BetPool>,
+
+    /// CHECK: Safe because it's derived from bet_pool
+    #[account(
+    init,
+    seeds = [b"fee_vault", bet_pool.key().as_ref()],
+    bump,
+    payer = admin,
+    space = 8
+)]
+pub fee_vault: AccountInfo<'info>,
+
 
     #[account(mut)]
     pub admin: Signer<'info>,
     pub system_program: Program<'info, System>,
 }
 
+
+
 #[derive(Accounts)]
+#[instruction(fixture_id: u64, player_id: Pubkey, stat_name: String, stat_line: u32)]
 pub struct PlaceBet<'info> {
     #[account(mut)]
     pub bettor: Signer<'info>,
 
-    #[account(mut)]
+    #[account(
+        mut,
+        seeds = [
+            b"bet_pool",
+            fixture_id.to_le_bytes().as_ref(),
+            player_id.as_ref(),
+            stat_name.as_bytes(),
+            &stat_line.to_le_bytes()
+        ],
+        bump
+    )]
     pub bet_pool: Account<'info, BetPool>,
 
     #[account(
@@ -254,6 +318,7 @@ pub struct PlaceBet<'info> {
     pub system_program: Program<'info, System>,
     pub rent: Sysvar<'info, Rent>,
 }
+
 
 #[derive(Accounts)]
 pub struct PublishResult<'info> {
@@ -347,6 +412,7 @@ pub struct UserPick {
     pub claimed: bool,
     pub mint: Pubkey,
     pub bump: u8,
+    pub sport_name: [u8; 32],
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq, Eq)]
