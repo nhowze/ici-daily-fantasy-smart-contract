@@ -82,6 +82,21 @@ pub mod fantasy_sports {
         sport_name: [u8; 32],
         nonce: u64,
     ) -> Result<()> {
+
+    // 🔍 Debugging mismatched seeds for user_pick
+    let expected_user_pick = Pubkey::find_program_address(
+        &[
+            b"user_pick",
+            ctx.accounts.bettor.key().as_ref(),
+            ctx.accounts.bet_pool.key().as_ref(),
+            &nonce.to_le_bytes(),
+        ],
+        ctx.program_id,
+    ).0;
+    msg!("Expected user_pick PDA: {}", expected_user_pick);
+    msg!("Received user_pick: {}", ctx.accounts.user_pick.key());
+
+
         let bump = ctx.bumps.mint_authority;
         let user_pick_key = ctx.accounts.user_pick.key();
         let seeds = &[b"mint", user_pick_key.as_ref(), &[bump]];
