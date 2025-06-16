@@ -5,10 +5,10 @@ members = ["programs/fantasy_sports"]
 anchor_version = "0.31.1"
 
 [programs.devnet]
-fantasy_sports = "3x7u6RMoygDW5nHB8cFk3cdrm3qMsPLgjDPPmchRTEqX"
+fantasy_sports = "5faLUWJzNrtPLoxMBLwhJw9U6BMUXBuqhA3A7Pr2E9qR"
 
 [programs.localnet]
-fantasy_sports = "3x7u6RMoygDW5nHB8cFk3cdrm3qMsPLgjDPPmchRTEqX"
+fantasy_sports = "5faLUWJzNrtPLoxMBLwhJw9U6BMUXBuqhA3A7Pr2E9qR"
 
 [provider]
 cluster = "devnet"
@@ -17,3 +17,5 @@ wallet = "~/.config/solana/id.json"
 [scripts]
 test = "yarn mocha -r ts-node/register tests/**/*.ts"
 
+[features]
+skip-lint = true

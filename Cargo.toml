@@ -6,8 +6,8 @@ resolver = "2"
 edition = "2021"
 
 [workspace.dependencies]
-anchor-lang = "0.31.1"
-anchor-spl = "0.31.1"
+anchor-lang = "=0.31.0"
+anchor-spl = "=0.31.0"
 solana-program = "1.18.15"
 
 [profile.release]
