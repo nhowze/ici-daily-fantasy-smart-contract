@@ -16,6 +16,7 @@ custom-panic = []
 no-log-ix-name = []
 no-idl = []
 cpi = []
+no-entrypoint = [] 
 idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
 
 [dependencies]
