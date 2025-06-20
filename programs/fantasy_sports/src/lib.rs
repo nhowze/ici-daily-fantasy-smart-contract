@@ -1,10 +1,11 @@
 #![allow(clippy::result_large_err)]
 use anchor_lang::prelude::*;
-use anchor_spl::token::{self, Mint, MintTo, Token, TokenAccount};
-use anchor_lang::solana_program::program::invoke;
+use anchor_spl::token::{self, Mint, MintTo, Token, TokenAccount, InitializeMint};
+use anchor_spl::associated_token::{self, AssociatedToken};
+use anchor_lang::solana_program::program::{invoke, invoke_signed};
 use anchor_lang::solana_program::system_instruction;
-use anchor_lang::solana_program::system_program;
-use anchor_lang::solana_program::program::invoke_signed;
+
+
 #[error_code]
 pub enum ErrorCode {
     #[msg("This pick has already been claimed.")]
@@ -24,7 +25,7 @@ pub enum ErrorCode {
 }
 
 
-declare_id!("4ATf8K3EfcdT1RVKUybE95DSF9nZ3rhD9s9mathPPrDy");
+declare_id!("GsU3ct6ay1h9oJKWsxDjJXnBJzQrffdxMHGCLTRoQxPw");
 
 #[program]
 pub mod fantasy_sports {
@@ -45,26 +46,24 @@ pub fn initialize_bet_pool(
 
     require!(fixture_id > 0, ErrorCode::InvalidFixture);
     require!(stat_line > 0, ErrorCode::InvalidStatLine);
-    require!(betting_deadline > Clock::get()?.unix_timestamp, ErrorCode::DeadlinePassed);
+    require!(
+        betting_deadline > Clock::get()?.unix_timestamp,
+        ErrorCode::DeadlinePassed
+    );
 
-    let bet_pool_account_info = ctx.accounts.bet_pool.to_account_info();
-
-
-
-    let pool = BetPool {
-        fixture_id,
-        sport_name,
-        player_id,
-        stat_name,
-        stat_line,
-        deadline: betting_deadline,
-        total_over_amount: 0,
-        total_under_amount: 0,
-        fee_vault: ctx.accounts.fee_vault.key(),
-        result_published: false,
-        final_stat: 0,
-        bump: ctx.bumps.bet_pool,
-    };
+    let bet_pool = &mut ctx.accounts.bet_pool;
+    bet_pool.fixture_id = fixture_id;
+    bet_pool.player_id = player_id;
+    bet_pool.stat_name = stat_name;
+    bet_pool.stat_line = stat_line;
+    bet_pool.sport_name = sport_name;
+    bet_pool.deadline = betting_deadline;
+    bet_pool.total_over_amount = 0;
+    bet_pool.total_under_amount = 0;
+    bet_pool.fee_vault = ctx.accounts.fee_vault.key();
+    bet_pool.result_published = false;
+    bet_pool.final_stat = 0;
+    bet_pool.bump = ctx.bumps.bet_pool;
 
     msg!("🔒 fixture_id: {:?}", fixture_id.to_le_bytes());
     msg!("🔒 sport_name: {:?}", sport_name);
@@ -72,10 +71,7 @@ pub fn initialize_bet_pool(
     msg!("🔒 stat_name: {:?}", stat_name);
     msg!("🔒 stat_line: {:?}", stat_line.to_le_bytes());
 
-    let mut data = bet_pool_account_info.try_borrow_mut_data()?;
-    let mut cursor = std::io::Cursor::new(data.as_mut());
-    pool.try_serialize(&mut cursor)?;
-
+    // Optional: Debug PDA derivation (useful for verifying correct seeds)
     let seeds = &[
         b"bet_pool",
         &fixture_id.to_le_bytes(),
@@ -93,75 +89,133 @@ pub fn initialize_bet_pool(
 }
 
 
-    pub fn place_bet(
-        ctx: Context<PlaceBet>,
-        _fixture_id: u64,
-        _player_id: Pubkey,
-        _stat_name: [u8; 32],
-        _stat_line: u32,
-        bet_amount: u64,
-        pick_side: bool,
-        _sport_name: [u8; 32],
-        _nonce: u64,
-    ) -> Result<()> {
-        let user_pick = &mut ctx.accounts.user_pick;
-        let sport_name = ctx.accounts.bet_pool.sport_name;
-        let bet_pool = &mut ctx.accounts.bet_pool;
+pub fn place_bet(
+    ctx: Context<PlaceBet>,
+    _fixture_id: u64,
+    _player_id: Pubkey,
+    _stat_name: [u8; 32],
+    _stat_line: u32,
+    bet_amount: u64,
+    pick_side: bool,
+    _sport_name: [u8; 32],
+) -> Result<()> {
+    // 🔢 1. Save current nonce and increment it
+    let nonce = ctx.accounts.user_nonce.count;
+    ctx.accounts.user_nonce.count += 1;
 
-        let fee = (bet_amount * 5) / 100;
-        let net_amount = bet_amount - fee;
+    let user_pick = &mut ctx.accounts.user_pick;
+    let sport_name = ctx.accounts.bet_pool.sport_name;
+    let bet_pool = &mut ctx.accounts.bet_pool;
 
-        user_pick.owner = ctx.accounts.bettor.key();
-        user_pick.bet_amount = net_amount;
-        user_pick.pick_side = pick_side;
-        user_pick.pool = bet_pool.key();
-        user_pick.claimed = false;
-        user_pick.mint = ctx.accounts.mint.key();
-        user_pick.bump = ctx.bumps.user_pick;
-        user_pick.sport_name = sport_name;
+    let fee = (bet_amount * 5) / 100;
+    let net_amount = bet_amount - fee;
 
-        if pick_side {
-            bet_pool.total_over_amount += net_amount;
-        } else {
-            bet_pool.total_under_amount += net_amount;
-        }
+    user_pick.owner = ctx.accounts.bettor.key();
+    user_pick.bet_amount = net_amount;
+    user_pick.pick_side = pick_side;
+    user_pick.pool = bet_pool.key();
+    user_pick.claimed = false;
+    user_pick.mint = ctx.accounts.mint.key();
+    user_pick.bump = ctx.bumps.user_pick;
+    user_pick.sport_name = sport_name;
 
-        invoke(
-            &system_instruction::transfer(
-                &ctx.accounts.bettor.key(),
-                &ctx.accounts.fee_vault.key(),
-                fee,
-            ),
-            &[ctx.accounts.bettor.to_account_info(), ctx.accounts.fee_vault.to_account_info(), ctx.accounts.system_program.to_account_info()],
-        )?;
+    if pick_side {
+        bet_pool.total_over_amount += net_amount;
+    } else {
+        bet_pool.total_under_amount += net_amount;
+    }
 
-        invoke(
-            &system_instruction::transfer(
-                &ctx.accounts.bettor.key(),
-                &ctx.accounts.bet_vault.key(),
-                net_amount,
-            ),
-            &[ctx.accounts.bettor.to_account_info(), ctx.accounts.bet_vault.to_account_info(), ctx.accounts.system_program.to_account_info()],
-        )?;
+    invoke(
+        &system_instruction::transfer(
+            &ctx.accounts.bettor.key(),
+            &ctx.accounts.fee_vault.key(),
+            fee,
+        ),
+        &[
+            ctx.accounts.bettor.to_account_info(),
+            ctx.accounts.fee_vault.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+        ],
+    )?;
 
-        let mint_authority_bump = ctx.bumps.mint_authority;
-        let mint_key = user_pick.key();
-        let mint_seeds: &[&[u8]] = &[b"mint", mint_key.as_ref(), &[mint_authority_bump]];
-        let signer_seeds: &[&[&[u8]]] = &[mint_seeds];
-        let cpi_accounts = MintTo {
+    invoke(
+        &system_instruction::transfer(
+            &ctx.accounts.bettor.key(),
+            &ctx.accounts.bet_vault.key(),
+            net_amount,
+        ),
+        &[
+            ctx.accounts.bettor.to_account_info(),
+            ctx.accounts.bet_vault.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+        ],
+    )?;
+
+    let mint_authority_bump = ctx.bumps.mint_authority;
+    let mint_key = user_pick.key();
+    let mint_seeds: &[&[u8]] = &[b"mint", mint_key.as_ref(), &[mint_authority_bump]];
+    let signer_seeds: &[&[&[u8]]] = &[mint_seeds];
+
+
+        let cpi_accounts = token::InitializeMint {
             mint: ctx.accounts.mint.to_account_info(),
-            to: ctx.accounts.user_token_account.to_account_info(),
-            authority: ctx.accounts.mint_authority.to_account_info(),
+            rent: ctx.accounts.rent.to_account_info(),
         };
         let cpi_ctx = CpiContext::new_with_signer(
             ctx.accounts.token_program.to_account_info(),
             cpi_accounts,
             signer_seeds,
         );
-        token::mint_to(cpi_ctx, 1)?;
 
-        Ok(())
+        if ctx.accounts.mint.to_account_info().try_borrow_data()?[0] == 0 {
+    let cpi_accounts = token::InitializeMint {
+        mint: ctx.accounts.mint.to_account_info(),
+        rent: ctx.accounts.rent.to_account_info(),
+    };
+    let cpi_ctx = CpiContext::new_with_signer(
+        ctx.accounts.token_program.to_account_info(),
+        cpi_accounts,
+        signer_seeds,
+    );
+    token::initialize_mint(
+        cpi_ctx,
+        0,
+        &ctx.accounts.mint_authority.key(),
+        Some(&ctx.accounts.mint_authority.key()),
+    )?;
+}
+
+    if ctx.accounts.user_token_account.to_account_info().try_borrow_data()?.len() == 0 {
+        let ata_ctx = CpiContext::new(
+            ctx.accounts.associated_token_program.to_account_info(),
+            associated_token::Create {
+                payer: ctx.accounts.bettor.to_account_info(),
+                associated_token: ctx.accounts.user_token_account.to_account_info(),
+                authority: ctx.accounts.bettor.to_account_info(),
+                mint: ctx.accounts.mint.to_account_info(),
+                system_program: ctx.accounts.system_program.to_account_info(),
+                token_program: ctx.accounts.token_program.to_account_info(),
+            },
+        );
+        associated_token::create(ata_ctx)?;
     }
+
+    let cpi_accounts = MintTo {
+        mint: ctx.accounts.mint.to_account_info(),
+        to: ctx.accounts.user_token_account.to_account_info(),
+        authority: ctx.accounts.mint_authority.to_account_info(),
+    };
+    let cpi_ctx = CpiContext::new_with_signer(
+        ctx.accounts.token_program.to_account_info(),
+        cpi_accounts,
+        signer_seeds,
+    );
+    token::mint_to(cpi_ctx, 1)?;
+
+    Ok(())
+}
+
+
 }
 
 //program end 
@@ -215,7 +269,7 @@ pub bet_vault: UncheckedAccount<'info>,
 
 
 #[derive(Accounts)]
-#[instruction(fixture_id: u64, player_id: Pubkey, stat_name: [u8; 32], stat_line: u32, bet_amount: u64, pick_side: bool, sport_name: [u8; 32], nonce: u64)]
+#[instruction(fixture_id: u64, player_id: Pubkey, stat_name: [u8; 32], stat_line: u32, sport_name: [u8; 32])]
 pub struct PlaceBet<'info> {
     #[account(mut, signer)]
     pub bettor: Signer<'info>,
@@ -224,30 +278,48 @@ pub struct PlaceBet<'info> {
     pub bet_pool: Account<'info, BetPool>,
 
     #[account(
+        init_if_needed,
+        payer = bettor,
+        space = 8 + 8, // 8 discriminator + u64 count
+        seeds = [b"user_nonce", bettor.key().as_ref(), bet_pool.key().as_ref()],
+        bump
+    )]
+    pub user_nonce: Account<'info, UserNonce>,
+
+    #[account(
         init,
         payer = bettor,
-        seeds = [b"user_pick", bettor.key().as_ref(), bet_pool.key().as_ref(), &nonce.to_le_bytes()],
-        bump,
         space = 8 + std::mem::size_of::<UserPick>(),
+        seeds = [
+            b"user_pick",
+            bettor.key().as_ref(),
+            bet_pool.key().as_ref(),
+            &user_nonce.count.to_le_bytes(),
+        ],
+        bump
     )]
     pub user_pick: Account<'info, UserPick>,
 
     #[account(
-        mut,
+        init_if_needed,
+        payer = bettor,
         seeds = [b"mint", user_pick.key().as_ref()],
         bump,
+        mint::decimals = 0,
+        mint::authority = mint_authority,
     )]
     pub mint: Account<'info, Mint>,
 
     #[account(
         seeds = [b"mint", user_pick.key().as_ref()],
-        bump,
+        bump
     )]
     /// CHECK: PDA mint authority signer
     pub mint_authority: UncheckedAccount<'info>,
 
     #[account(mut)]
-    pub user_token_account: Account<'info, TokenAccount>,
+    /// CHECK: created in-program if needed
+    pub user_token_account: AccountInfo<'info>,
 
     #[account(mut)]
     /// CHECK: PDA for fee collection
@@ -258,8 +330,11 @@ pub struct PlaceBet<'info> {
     pub bet_vault: UncheckedAccount<'info>,
 
     pub token_program: Program<'info, Token>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
     pub system_program: Program<'info, System>,
+    pub rent: Sysvar<'info, Rent>,
 }
+
 
 
 #[account]
@@ -272,6 +347,11 @@ pub struct UserPick {
     pub mint: Pubkey,
     pub bump: u8,
     pub sport_name: [u8; 32],
+}
+
+#[account]
+pub struct UserNonce {
+    pub count: u64,
 }
 
 #[account]
