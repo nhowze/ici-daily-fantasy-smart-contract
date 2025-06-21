@@ -25,7 +25,7 @@ pub enum ErrorCode {
 }
 
 
-declare_id!("GsU3ct6ay1h9oJKWsxDjJXnBJzQrffdxMHGCLTRoQxPw");
+declare_id!("Adf2W6ES1MKGabjLGVF43rdc7ZdQJTCExK2yJ9dWcpA3");
 
 #[program]
 pub mod fantasy_sports {
