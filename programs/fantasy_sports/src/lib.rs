@@ -306,6 +306,33 @@ pub fn settle_claim(ctx: Context<SettleClaim>) -> Result<()> {
     Ok(())
 }
 
+    pub fn withdraw_fees(ctx: Context<WithdrawFees>) -> Result<()> {
+        let admin_pk = Pubkey::from_str(ADMIN_PUBKEY).unwrap();
+        require!(ctx.accounts.admin.key() == admin_pk, ErrorCode::Unauthorized);
+
+        let bet_pool = &ctx.accounts.bet_pool;
+
+        // Derive the correct fee_vault PDA to confirm ownership
+        let (expected_fee_vault, _) = Pubkey::find_program_address(
+            &[b"fee_vault", bet_pool.key().as_ref()],
+            ctx.program_id,
+        );
+        require!(ctx.accounts.fee_vault.key() == expected_fee_vault, ErrorCode::InvalidFeeVault);
+
+        let fee_vault_lamports = ctx.accounts.fee_vault.lamports();
+        if fee_vault_lamports < 5000 {
+            msg!("Skipping withdrawal: too few lamports ({}).", fee_vault_lamports);
+            return Ok(()); // Avoid micro-transfers
+        }
+
+        **ctx.accounts.fee_vault.to_account_info().try_borrow_mut_lamports()? -= fee_vault_lamports;
+        **ctx.accounts.recipient.to_account_info().try_borrow_mut_lamports()? += fee_vault_lamports;
+
+        msg!("✅ Withdrew {} lamports from fee_vault {} to recipient {}", fee_vault_lamports, ctx.accounts.fee_vault.key(), ctx.accounts.recipient.key());
+
+        Ok(())
+    }
+
 }
 
 //program end 
@@ -472,14 +499,20 @@ pub struct BetPool {
 pub struct WithdrawFees<'info> {
     #[account(mut)]
     pub admin: Signer<'info>,
-    #[account(mut)]
+
+    #[account(mut, has_one = fee_vault)]
     pub bet_pool: Account<'info, BetPool>,
+
+    /// CHECK: validated manually using PDA derivation
     #[account(mut)]
-    pub fee_vault: SystemAccount<'info>,
+    pub fee_vault: UncheckedAccount<'info>,
+
     #[account(mut)]
     pub recipient: SystemAccount<'info>,
+
     pub system_program: Program<'info, System>,
 }
+
 
 #[derive(Accounts)]
 pub struct SettleClaim<'info> {
