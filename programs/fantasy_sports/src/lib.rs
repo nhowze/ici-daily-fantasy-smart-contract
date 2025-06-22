@@ -4,6 +4,11 @@ use anchor_spl::token::{self, Mint, MintTo, Token, TokenAccount, InitializeMint}
 use anchor_spl::associated_token::{self, AssociatedToken};
 use anchor_lang::solana_program::program::{invoke, invoke_signed};
 use anchor_lang::solana_program::system_instruction;
+use std::str::FromStr;
+
+declare_id!("AMYrtKSQVZdjtwXiLuDUNUMmzRSsshi6pSbj9eBcL4J1");
+
+pub const ADMIN_PUBKEY: &str = "5DcirLSutTThvZu9AJK9yGWXqs4HHumRvrtzZQggb7dW";
 
 
 #[error_code]
@@ -22,10 +27,12 @@ pub enum ErrorCode {
     InvalidStatLine,
     #[msg("Betting deadline must be in the future.")]
     DeadlinePassed,
+    #[msg("Result already published for this bet pool.")]
+    AlreadyPublished, // e.g., 0x65 if you want
 }
 
 
-declare_id!("Adf2W6ES1MKGabjLGVF43rdc7ZdQJTCExK2yJ9dWcpA3");
+
 
 #[program]
 pub mod fantasy_sports {
@@ -215,11 +222,99 @@ pub fn place_bet(
     Ok(())
 }
 
+pub fn admin_update_result(
+    ctx: Context<AdminUpdateResult>,
+    new_final_stat: u32,
+) -> Result<()> {
+
+    // Require only the admin can do this!
+    let admin_pk = Pubkey::from_str(ADMIN_PUBKEY).unwrap();
+require!(ctx.accounts.authority.key() == admin_pk, ErrorCode::Unauthorized);
+
+    let bet_pool = &mut ctx.accounts.bet_pool;
+    bet_pool.result_published = true;
+    bet_pool.final_stat = new_final_stat;
+
+    Ok(())
+}
+
+pub fn settle_claim(ctx: Context<SettleClaim>) -> Result<()> {
+    let bet_pool = &ctx.accounts.bet_pool;
+    let user_pick = &mut ctx.accounts.user_pick;
+
+    require!(user_pick.pool == bet_pool.key(), ErrorCode::Unauthorized);
+
+    // Ensure result is published
+    require!(bet_pool.result_published, ErrorCode::PoolNotSettled);
+
+    // Prevent double claim
+    require!(!user_pick.claimed, ErrorCode::AlreadyClaimed);
+
+    // Determine result
+    let over_wins = bet_pool.final_stat > bet_pool.stat_line;
+    let under_wins = bet_pool.final_stat < bet_pool.stat_line;
+
+    let winner_is_over = match (over_wins, under_wins) {
+        (true, false) => true,
+        (false, true) => false,
+        _ => {
+            // Mark as claimed for push/tie case so users can't retry forever
+            user_pick.claimed = true;
+            return Ok(()); // Push if equal — no winners
+        }
+    };
+
+    // Only send funds to winning picks
+    if user_pick.pick_side != winner_is_over {
+        user_pick.claimed = true;
+        return Ok(()); // Did not win — just mark claimed
+    }
+
+    // Calculate reward
+    let total_pool = bet_pool.total_over_amount + bet_pool.total_under_amount;
+    let winner_pool = if winner_is_over {
+        bet_pool.total_over_amount
+    } else {
+        bet_pool.total_under_amount
+    };
+
+    // Proportional payout
+    let user_share = (user_pick.bet_amount as u128)
+        .checked_mul(total_pool as u128)
+        .unwrap()
+        / (winner_pool as u128);
+
+    let payout = user_share as u64;
+
+    msg!("Paying {} lamports to {}", payout, ctx.accounts.recipient.key());
+
+    invoke(
+        &system_instruction::transfer(
+            &ctx.accounts.bet_vault.key(),
+            &ctx.accounts.recipient.key(),
+            payout,
+        ),
+        &[
+            ctx.accounts.bet_vault.to_account_info(),
+            ctx.accounts.recipient.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+        ],
+    )?;
+
+    user_pick.claimed = true;
+
+    Ok(())
+}
 
 }
 
 //program end 
-
+#[derive(Accounts)]
+pub struct AdminUpdateResult<'info> {
+    #[account(mut)]
+    pub bet_pool: Account<'info, BetPool>,
+    pub authority: Signer<'info>,
+}
 
 #[derive(Accounts)]
 #[instruction(fixture_id: u64, player_id: Pubkey, stat_name: [u8; 32], stat_line: u32, sport_name: [u8; 32])]
@@ -390,18 +485,21 @@ pub struct WithdrawFees<'info> {
 pub struct SettleClaim<'info> {
     #[account(mut)]
     pub user_pick: Account<'info, UserPick>,
+
     #[account(mut)]
     pub bet_pool: Account<'info, BetPool>,
+
     #[account(mut)]
+    /// CHECK: user receiving payout
     pub recipient: SystemAccount<'info>,
+
+    #[account(mut)]
+    /// CHECK: PDA lamport vault
+    pub bet_vault: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
 }
 
-#[derive(Accounts)]
-pub struct PublishResult<'info> {
-    #[account(mut)]
-    pub bet_pool: Account<'info, BetPool>,
-    pub authority: Signer<'info>,
-}
 
 
 #[derive(AnchorSerialize, AnchorDeserialize, Debug, Clone, PartialEq, Eq)]
