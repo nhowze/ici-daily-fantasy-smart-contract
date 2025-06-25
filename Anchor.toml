@@ -5,10 +5,10 @@ members = ["programs/fantasy_sports"]
 anchor_version = "0.31.1"
 
 [programs.devnet]
-fantasy_sports = "AMYrtKSQVZdjtwXiLuDUNUMmzRSsshi6pSbj9eBcL4J1"
+fantasy_sports = "6W1NLpkZvfu6y44nmCtQBLUEjGZQoCt6zQ9MouStHrFK"
 
 [programs.localnet]
-fantasy_sports = "AMYrtKSQVZdjtwXiLuDUNUMmzRSsshi6pSbj9eBcL4J1"
+fantasy_sports = "6W1NLpkZvfu6y44nmCtQBLUEjGZQoCt6zQ9MouStHrFK"
 
 [provider]
 cluster = "devnet"

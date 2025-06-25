@@ -1,12 +1,12 @@
 #![allow(clippy::result_large_err)]
 use anchor_lang::prelude::*;
-use anchor_spl::token::{self, Mint, MintTo, Token, TokenAccount, InitializeMint};
+use anchor_spl::token::{self, Mint, MintTo, Token};
 use anchor_spl::associated_token::{self, AssociatedToken};
 use anchor_lang::solana_program::program::{invoke, invoke_signed};
 use anchor_lang::solana_program::system_instruction;
 use std::str::FromStr;
 
-declare_id!("AMYrtKSQVZdjtwXiLuDUNUMmzRSsshi6pSbj9eBcL4J1");
+declare_id!("6W1NLpkZvfu6y44nmCtQBLUEjGZQoCt6zQ9MouStHrFK");
 
 pub const ADMIN_PUBKEY: &str = "5DcirLSutTThvZu9AJK9yGWXqs4HHumRvrtzZQggb7dW";
 
@@ -239,18 +239,15 @@ require!(ctx.accounts.authority.key() == admin_pk, ErrorCode::Unauthorized);
 }
 
 pub fn settle_claim(ctx: Context<SettleClaim>) -> Result<()> {
+    msg!("test");
+
     let bet_pool = &ctx.accounts.bet_pool;
     let user_pick = &mut ctx.accounts.user_pick;
 
     require!(user_pick.pool == bet_pool.key(), ErrorCode::Unauthorized);
-
-    // Ensure result is published
     require!(bet_pool.result_published, ErrorCode::PoolNotSettled);
-
-    // Prevent double claim
     require!(!user_pick.claimed, ErrorCode::AlreadyClaimed);
 
-    // Determine result
     let over_wins = bet_pool.final_stat > bet_pool.stat_line;
     let under_wins = bet_pool.final_stat < bet_pool.stat_line;
 
@@ -258,19 +255,16 @@ pub fn settle_claim(ctx: Context<SettleClaim>) -> Result<()> {
         (true, false) => true,
         (false, true) => false,
         _ => {
-            // Mark as claimed for push/tie case so users can't retry forever
             user_pick.claimed = true;
-            return Ok(()); // Push if equal — no winners
+            return Ok(()); // Push/tie
         }
     };
 
-    // Only send funds to winning picks
     if user_pick.pick_side != winner_is_over {
         user_pick.claimed = true;
-        return Ok(()); // Did not win — just mark claimed
+        return Ok(()); // Didn't win
     }
 
-    // Calculate reward
     let total_pool = bet_pool.total_over_amount + bet_pool.total_under_amount;
     let winner_pool = if winner_is_over {
         bet_pool.total_over_amount
@@ -278,7 +272,6 @@ pub fn settle_claim(ctx: Context<SettleClaim>) -> Result<()> {
         bet_pool.total_under_amount
     };
 
-    // Proportional payout
     let user_share = (user_pick.bet_amount as u128)
         .checked_mul(total_pool as u128)
         .unwrap()
@@ -287,51 +280,58 @@ pub fn settle_claim(ctx: Context<SettleClaim>) -> Result<()> {
     let payout = user_share as u64;
 
     msg!("Paying {} lamports to {}", payout, ctx.accounts.recipient.key());
+    msg!("🏦 total_pool: {}", total_pool);
+    msg!("🏆 winner_pool: {}", winner_pool);
+    msg!("💰 user_bet_amount: {}", user_pick.bet_amount);
 
-    invoke(
-        &system_instruction::transfer(
-            &ctx.accounts.bet_vault.key(),
-            &ctx.accounts.recipient.key(),
-            payout,
-        ),
-        &[
-            ctx.accounts.bet_vault.to_account_info(),
-            ctx.accounts.recipient.to_account_info(),
-            ctx.accounts.system_program.to_account_info(),
-        ],
-    )?;
+    // ✅ Manually transfer lamports between program-owned account and system account
+    **ctx.accounts.bet_vault.to_account_info().try_borrow_mut_lamports()? -= payout;
+    **ctx.accounts.recipient.to_account_info().try_borrow_mut_lamports()? += payout;
 
     user_pick.claimed = true;
+    Ok(())
+}
+
+
+
+pub fn withdraw_fees(ctx: Context<WithdrawFees>) -> Result<()> {
+    let admin_pk = Pubkey::from_str(ADMIN_PUBKEY).unwrap();
+    require!(ctx.accounts.admin.key() == admin_pk, ErrorCode::Unauthorized);
+
+    let bet_pool = &ctx.accounts.bet_pool;
+
+    let (expected_fee_vault, _) = Pubkey::find_program_address(
+        &[b"fee_vault", bet_pool.key().as_ref()],
+        ctx.program_id,
+    );
+    require!(
+        ctx.accounts.fee_vault.key() == expected_fee_vault,
+        ErrorCode::InvalidFeeVault
+    );
+
+    let fee_vault_lamports = ctx.accounts.fee_vault.lamports();
+    if fee_vault_lamports < 5000 {
+        msg!(
+            "Skipping withdrawal: too few lamports ({}).",
+            fee_vault_lamports
+        );
+        return Ok(());
+    }
+
+    // ✅ Direct lamport transfer
+    **ctx.accounts.fee_vault.to_account_info().try_borrow_mut_lamports()? -= fee_vault_lamports;
+    **ctx.accounts.recipient.to_account_info().try_borrow_mut_lamports()? += fee_vault_lamports;
+
+    msg!(
+        "✅ Withdrew {} lamports from fee_vault {} to recipient {}",
+        fee_vault_lamports,
+        ctx.accounts.fee_vault.key(),
+        ctx.accounts.recipient.key()
+    );
 
     Ok(())
 }
 
-    pub fn withdraw_fees(ctx: Context<WithdrawFees>) -> Result<()> {
-        let admin_pk = Pubkey::from_str(ADMIN_PUBKEY).unwrap();
-        require!(ctx.accounts.admin.key() == admin_pk, ErrorCode::Unauthorized);
-
-        let bet_pool = &ctx.accounts.bet_pool;
-
-        // Derive the correct fee_vault PDA to confirm ownership
-        let (expected_fee_vault, _) = Pubkey::find_program_address(
-            &[b"fee_vault", bet_pool.key().as_ref()],
-            ctx.program_id,
-        );
-        require!(ctx.accounts.fee_vault.key() == expected_fee_vault, ErrorCode::InvalidFeeVault);
-
-        let fee_vault_lamports = ctx.accounts.fee_vault.lamports();
-        if fee_vault_lamports < 5000 {
-            msg!("Skipping withdrawal: too few lamports ({}).", fee_vault_lamports);
-            return Ok(()); // Avoid micro-transfers
-        }
-
-        **ctx.accounts.fee_vault.to_account_info().try_borrow_mut_lamports()? -= fee_vault_lamports;
-        **ctx.accounts.recipient.to_account_info().try_borrow_mut_lamports()? += fee_vault_lamports;
-
-        msg!("✅ Withdrew {} lamports from fee_vault {} to recipient {}", fee_vault_lamports, ctx.accounts.fee_vault.key(), ctx.accounts.recipient.key());
-
-        Ok(())
-    }
 
 }
 
@@ -503,8 +503,11 @@ pub struct WithdrawFees<'info> {
     #[account(mut, has_one = fee_vault)]
     pub bet_pool: Account<'info, BetPool>,
 
-    /// CHECK: validated manually using PDA derivation
-    #[account(mut)]
+    #[account(
+        mut,
+        seeds = [b"fee_vault", bet_pool.key().as_ref()],
+        bump,
+    )]
     pub fee_vault: UncheckedAccount<'info>,
 
     #[account(mut)]
@@ -523,11 +526,13 @@ pub struct SettleClaim<'info> {
     pub bet_pool: Account<'info, BetPool>,
 
     #[account(mut)]
-    /// CHECK: user receiving payout
     pub recipient: SystemAccount<'info>,
 
-    #[account(mut)]
-    /// CHECK: PDA lamport vault
+    #[account(
+        mut,
+        seeds = [b"bet_vault", bet_pool.key().as_ref()],
+        bump,
+    )]
     pub bet_vault: UncheckedAccount<'info>,
 
     pub system_program: Program<'info, System>,
