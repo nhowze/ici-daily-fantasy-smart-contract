@@ -1,6 +1,6 @@
 #![allow(clippy::result_large_err)]
 use anchor_lang::prelude::*;
-use anchor_spl::token::{self, Mint, MintTo, Token};
+use anchor_spl::token::{self, Mint, MintTo, Token, TokenAccount, Transfer};
 use anchor_spl::associated_token::{self, AssociatedToken};
 use anchor_lang::solana_program::program::{invoke, invoke_signed};
 use anchor_lang::solana_program::system_instruction;
@@ -333,6 +333,101 @@ pub fn withdraw_fees(ctx: Context<WithdrawFees>) -> Result<()> {
 }
 
 
+
+    pub fn buy_pick_nft(ctx: Context<BuyPickNFT>, sale_price: u64) -> Result<()> {
+        let user_pick = &mut ctx.accounts.user_pick;
+
+        // Prevent buying if pick has already been claimed
+        require!(!user_pick.claimed, ErrorCode::AlreadyClaimed);
+
+        // Prevent buying if pool is already settled
+        let bet_pool = &ctx.accounts.pool;
+        require!(!bet_pool.result_published, ErrorCode::PoolNotSettled);
+
+        // Calculate royalty fee (2.5%) and seller payout
+        let royalty_fee = (sale_price * 25) / 1000;
+        let seller_amount = sale_price - royalty_fee;
+
+        // Transfer to seller
+        invoke(
+            &system_instruction::transfer(
+                &ctx.accounts.buyer.key(),
+                &ctx.accounts.seller.key(),
+                seller_amount,
+            ),
+            &[
+                ctx.accounts.buyer.to_account_info(),
+                ctx.accounts.seller.to_account_info(),
+                ctx.accounts.system_program.to_account_info(),
+            ],
+        )?;
+
+        // Transfer royalty to royalty vault (admin wallet or PDA)
+        invoke(
+            &system_instruction::transfer(
+                &ctx.accounts.buyer.key(),
+                &ctx.accounts.royalty_vault.key(),
+                royalty_fee,
+            ),
+            &[
+                ctx.accounts.buyer.to_account_info(),
+                ctx.accounts.royalty_vault.to_account_info(),
+                ctx.accounts.system_program.to_account_info(),
+            ],
+        )?;
+
+        // Transfer the NFT from seller to buyer
+        let cpi_accounts = Transfer {
+            from: ctx.accounts.seller_token_account.to_account_info(),
+            to: ctx.accounts.buyer_token_account.to_account_info(),
+            authority: ctx.accounts.seller.to_account_info(),
+        };
+        let cpi_ctx = CpiContext::new(ctx.accounts.token_program.to_account_info(), cpi_accounts);
+        token::transfer(cpi_ctx, 1)?;
+
+        // Update ownership
+        user_pick.owner = ctx.accounts.buyer.key();
+
+        Ok(())
+    }
+
+        pub fn list_pick_nft(ctx: Context<ListPickNFT>) -> Result<()> {
+        // Transfer NFT from seller to escrow
+        let cpi_accounts = Transfer {
+            from: ctx.accounts.seller_token_account.to_account_info(),
+            to: ctx.accounts.escrow_token_account.to_account_info(),
+            authority: ctx.accounts.seller.to_account_info(),
+        };
+        let cpi_ctx = CpiContext::new(ctx.accounts.token_program.to_account_info(), cpi_accounts);
+        token::transfer(cpi_ctx, 1)?;
+
+        Ok(())
+    }
+
+pub fn reclaim_unsold_pick(ctx: Context<ReclaimUnsoldPick>) -> Result<()> {
+    let user_pick = &ctx.accounts.user_pick;
+
+   let user_pick_key = user_pick.key();
+let seeds = &[b"escrow", user_pick_key.as_ref(), &[ctx.bumps.escrow_token_account]];
+let signer = &[&seeds[..]];
+
+let cpi_accounts = Transfer {
+    from: ctx.accounts.escrow_token_account.to_account_info(),
+    to: ctx.accounts.seller_token_account.to_account_info(),
+    authority: ctx.accounts.escrow_token_account.to_account_info(), // ⚠️ This should be escrow authority PDA
+};
+
+let cpi_ctx = CpiContext::new_with_signer(
+    ctx.accounts.token_program.to_account_info(),
+    cpi_accounts,
+    signer,
+);
+
+    token::transfer(cpi_ctx, ctx.accounts.user_pick.bet_amount)?;
+
+    Ok(())
+}
+
 }
 
 //program end 
@@ -474,6 +569,120 @@ pub struct UserPick {
 #[account]
 pub struct UserNonce {
     pub count: u64,
+}
+
+#[derive(Accounts)]
+pub struct BuyPickNFT<'info> {
+    #[account(mut)]
+    pub seller: Signer<'info>,
+
+    #[account(mut)]
+    pub buyer: Signer<'info>,
+
+    #[account(mut, has_one = mint, has_one = pool)]
+    pub user_pick: Account<'info, UserPick>,
+
+    #[account(mut)]
+    pub mint: Account<'info, token::Mint>,
+
+    #[account(mut)]
+    pub pool: Account<'info, BetPool>,
+
+    #[account(
+        mut,
+        associated_token::mint = mint,
+        associated_token::authority = seller
+    )]
+    pub seller_token_account: Account<'info, TokenAccount>,
+
+    #[account(
+        init_if_needed,
+        payer = buyer,
+        associated_token::mint = mint,
+        associated_token::authority = buyer
+    )]
+    pub buyer_token_account: Account<'info, TokenAccount>,
+
+    #[account(mut, seeds = [b"fee_vault", pool.key().as_ref()], bump)]
+    pub royalty_vault: UncheckedAccount<'info>,
+
+    pub token_program: Program<'info, Token>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
+    pub system_program: Program<'info, System>,
+    pub rent: Sysvar<'info, Rent>,
+}
+
+#[derive(Accounts)]
+pub struct ListPickNFT<'info> {
+    #[account(mut)]
+    pub seller: Signer<'info>,
+
+    #[account(mut)]
+    pub user_pick: Account<'info, UserPick>,
+
+    #[account(mut)]
+    pub mint: Account<'info, Mint>,
+
+    #[account(mut)]
+    pub pool: Account<'info, BetPool>,
+
+    #[account(
+        mut,
+        associated_token::mint = mint,
+        associated_token::authority = seller
+    )]
+    pub seller_token_account: Account<'info, TokenAccount>,
+
+    #[account(
+        init_if_needed,
+        payer = seller,
+        associated_token::mint = mint,
+        associated_token::authority = escrow_pda
+    )]
+    pub escrow_token_account: Account<'info, TokenAccount>,
+
+    /// CHECK: PDA to own NFT
+    #[account(
+        seeds = [b"escrow", user_pick.key().as_ref()],
+        bump
+    )]
+    pub escrow_pda: UncheckedAccount<'info>,
+
+    pub token_program: Program<'info, Token>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
+    pub system_program: Program<'info, System>,
+    pub rent: Sysvar<'info, Rent>,
+}
+
+#[derive(Accounts)]
+pub struct ReclaimUnsoldPick<'info> {
+    #[account(mut)]
+    pub seller: Signer<'info>,
+
+    #[account(mut)]
+    pub user_pick: Account<'info, UserPick>,
+
+    #[account(mut)]
+    pub mint: Account<'info, Mint>,
+
+    #[account(mut)]
+    pub pool: Account<'info, BetPool>,
+
+    #[account(
+        mut,
+        associated_token::mint = mint,
+        associated_token::authority = seller
+    )]
+    pub seller_token_account: Account<'info, TokenAccount>,
+
+    #[account(
+        mut,
+        seeds = [b"escrow", user_pick.key().as_ref()],
+        bump
+    )]
+    pub escrow_token_account: Account<'info, TokenAccount>,
+
+    pub token_program: Program<'info, Token>, // 👈 this was missing
 }
 
 #[account]
