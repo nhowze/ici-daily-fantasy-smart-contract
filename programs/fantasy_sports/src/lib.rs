@@ -332,6 +332,33 @@ pub fn withdraw_fees(ctx: Context<WithdrawFees>) -> Result<()> {
     Ok(())
 }
 
+pub fn delist_pick(ctx: Context<DelistPick>) -> Result<()> {
+    let user_pick = &mut ctx.accounts.user_pick;
+
+    // Transfer NFT back from escrow to seller
+    let user_pick_key = user_pick.key();
+    let seeds = &[b"escrow", user_pick_key.as_ref(), &[ctx.bumps.escrow_token_account]];
+    let signer = &[&seeds[..]];
+
+    let cpi_accounts = Transfer {
+        from: ctx.accounts.escrow_token_account.to_account_info(),
+        to: ctx.accounts.seller_token_account.to_account_info(),
+        authority: ctx.accounts.escrow_token_account.to_account_info(),
+    };
+
+    let cpi_ctx = CpiContext::new_with_signer(
+        ctx.accounts.token_program.to_account_info(),
+        cpi_accounts,
+        signer,
+    );
+
+    token::transfer(cpi_ctx, 1)?;
+
+    // Mark it not for sale
+    user_pick.for_sale = false;
+
+    Ok(())
+}
 
 
     pub fn buy_pick_nft(ctx: Context<BuyPickNFT>, sale_price: u64) -> Result<()> {
@@ -564,11 +591,35 @@ pub struct UserPick {
     pub mint: Pubkey,
     pub bump: u8,
     pub sport_name: [u8; 32],
+    pub for_sale: bool,
 }
 
 #[account]
 pub struct UserNonce {
     pub count: u64,
+}
+
+#[derive(Accounts)]
+pub struct DelistPick<'info> {
+    #[account(mut, has_one = owner)]
+    pub user_pick: Account<'info, UserPick>,
+
+    #[account(mut)]
+    pub owner: Signer<'info>,
+
+    #[account(mut)]
+    pub mint: Account<'info, Mint>,
+
+    #[account(mut,
+        seeds = [b"escrow", user_pick.key().as_ref()],
+        bump
+    )]
+    pub escrow_token_account: Account<'info, TokenAccount>,
+
+    #[account(mut)]
+    pub seller_token_account: Account<'info, TokenAccount>,
+
+    pub token_program: Program<'info, Token>,
 }
 
 #[derive(Accounts)]
