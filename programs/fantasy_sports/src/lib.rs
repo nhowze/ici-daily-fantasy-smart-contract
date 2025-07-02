@@ -29,6 +29,8 @@ pub enum ErrorCode {
     DeadlinePassed,
     #[msg("Result already published for this bet pool.")]
     AlreadyPublished, // e.g., 0x65 if you want
+    #[msg("This pick is not listed for sale.")]
+    NotListedForSale, // ✅ Add this line
 }
 
 
@@ -333,17 +335,86 @@ pub fn withdraw_fees(ctx: Context<WithdrawFees>) -> Result<()> {
 }
 
 pub fn delist_pick(ctx: Context<DelistPick>) -> Result<()> {
+let user_pick_key = ctx.accounts.user_pick.key(); // <-- Immutable borrow first
+
+let bump = ctx.bumps.escrow_pda;
+
+let seeds: &[&[u8]] = &[
+    b"escrow",
+    user_pick_key.as_ref(), // use the key from above
+    &[bump],
+];
+let signer = &[seeds];
+
+let cpi_accounts = Transfer {
+    from: ctx.accounts.escrow_token_account.to_account_info(),
+    to: ctx.accounts.seller_token_account.to_account_info(),
+    authority: ctx.accounts.escrow_pda.to_account_info(),
+};
+
+let cpi_ctx = CpiContext::new_with_signer(
+    ctx.accounts.token_program.to_account_info(),
+    cpi_accounts,
+    signer,
+);
+
+token::transfer(cpi_ctx, 1)?;
+
+// Now you can mutably borrow `user_pick`
+let user_pick = &mut ctx.accounts.user_pick;
+user_pick.for_sale = false;
+
+Ok(())
+}
+
+
+
+pub fn buy_pick_nft(ctx: Context<BuyPickNFT>, sale_price: u64) -> Result<()> {
     let user_pick = &mut ctx.accounts.user_pick;
 
-    // Transfer NFT back from escrow to seller
+    require!(!user_pick.claimed, ErrorCode::AlreadyClaimed);
+    require!(!ctx.accounts.pool.result_published, ErrorCode::PoolNotSettled);
+
+    let royalty_fee = (sale_price * 25) / 1000;
+    let seller_amount = sale_price - royalty_fee;
+
+    // Pay seller
+    invoke(
+        &system_instruction::transfer(
+            &ctx.accounts.buyer.key(),
+            &ctx.accounts.seller.key(),
+            seller_amount,
+        ),
+        &[
+            ctx.accounts.buyer.to_account_info(),
+            ctx.accounts.seller.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+        ],
+    )?;
+
+    // Pay royalty
+    invoke(
+        &system_instruction::transfer(
+            &ctx.accounts.buyer.key(),
+            &ctx.accounts.royalty_vault.key(),
+            royalty_fee,
+        ),
+        &[
+            ctx.accounts.buyer.to_account_info(),
+            ctx.accounts.royalty_vault.to_account_info(),
+            ctx.accounts.system_program.to_account_info(),
+        ],
+    )?;
+
+    // Transfer NFT from escrow to buyer
     let user_pick_key = user_pick.key();
-    let seeds = &[b"escrow", user_pick_key.as_ref(), &[ctx.bumps.escrow_token_account]];
+    let seeds = &[b"escrow", user_pick_key.as_ref(), &[ctx.bumps.escrow_pda]];
     let signer = &[&seeds[..]];
 
     let cpi_accounts = Transfer {
-        from: ctx.accounts.escrow_token_account.to_account_info(),
-        to: ctx.accounts.seller_token_account.to_account_info(),
-        authority: ctx.accounts.escrow_token_account.to_account_info(),
+        from: ctx.accounts.escrow_pda.to_account_info(),
+        to: ctx.accounts.buyer_token_account.to_account_info(),
+        authority: ctx.accounts.escrow_pda.to_account_info(),
     };
 
     let cpi_ctx = CpiContext::new_with_signer(
@@ -351,72 +422,15 @@ pub fn delist_pick(ctx: Context<DelistPick>) -> Result<()> {
         cpi_accounts,
         signer,
     );
-
     token::transfer(cpi_ctx, 1)?;
 
-    // Mark it not for sale
+    // Update pick ownership
+    user_pick.owner = ctx.accounts.buyer.key();
     user_pick.for_sale = false;
 
     Ok(())
 }
 
-
-    pub fn buy_pick_nft(ctx: Context<BuyPickNFT>, sale_price: u64) -> Result<()> {
-        let user_pick = &mut ctx.accounts.user_pick;
-
-        // Prevent buying if pick has already been claimed
-        require!(!user_pick.claimed, ErrorCode::AlreadyClaimed);
-
-        // Prevent buying if pool is already settled
-        let bet_pool = &ctx.accounts.pool;
-        require!(!bet_pool.result_published, ErrorCode::PoolNotSettled);
-
-        // Calculate royalty fee (2.5%) and seller payout
-        let royalty_fee = (sale_price * 25) / 1000;
-        let seller_amount = sale_price - royalty_fee;
-
-        // Transfer to seller
-        invoke(
-            &system_instruction::transfer(
-                &ctx.accounts.buyer.key(),
-                &ctx.accounts.seller.key(),
-                seller_amount,
-            ),
-            &[
-                ctx.accounts.buyer.to_account_info(),
-                ctx.accounts.seller.to_account_info(),
-                ctx.accounts.system_program.to_account_info(),
-            ],
-        )?;
-
-        // Transfer royalty to royalty vault (admin wallet or PDA)
-        invoke(
-            &system_instruction::transfer(
-                &ctx.accounts.buyer.key(),
-                &ctx.accounts.royalty_vault.key(),
-                royalty_fee,
-            ),
-            &[
-                ctx.accounts.buyer.to_account_info(),
-                ctx.accounts.royalty_vault.to_account_info(),
-                ctx.accounts.system_program.to_account_info(),
-            ],
-        )?;
-
-        // Transfer the NFT from seller to buyer
-        let cpi_accounts = Transfer {
-            from: ctx.accounts.seller_token_account.to_account_info(),
-            to: ctx.accounts.buyer_token_account.to_account_info(),
-            authority: ctx.accounts.seller.to_account_info(),
-        };
-        let cpi_ctx = CpiContext::new(ctx.accounts.token_program.to_account_info(), cpi_accounts);
-        token::transfer(cpi_ctx, 1)?;
-
-        // Update ownership
-        user_pick.owner = ctx.accounts.buyer.key();
-
-        Ok(())
-    }
 
         pub fn list_pick_nft(ctx: Context<ListPickNFT>) -> Result<()> {
         // Transfer NFT from seller to escrow
@@ -427,33 +441,45 @@ pub fn delist_pick(ctx: Context<DelistPick>) -> Result<()> {
         };
         let cpi_ctx = CpiContext::new(ctx.accounts.token_program.to_account_info(), cpi_accounts);
         token::transfer(cpi_ctx, 1)?;
-
+        ctx.accounts.user_pick.for_sale = true;
         Ok(())
     }
 
 pub fn reclaim_unsold_pick(ctx: Context<ReclaimUnsoldPick>) -> Result<()> {
-    let user_pick = &ctx.accounts.user_pick;
+    let user_pick = &mut ctx.accounts.user_pick;
 
-   let user_pick_key = user_pick.key();
-let seeds = &[b"escrow", user_pick_key.as_ref(), &[ctx.bumps.escrow_token_account]];
-let signer = &[&seeds[..]];
+    user_pick.for_sale = false;
 
-let cpi_accounts = Transfer {
-    from: ctx.accounts.escrow_token_account.to_account_info(),
-    to: ctx.accounts.seller_token_account.to_account_info(),
-    authority: ctx.accounts.escrow_token_account.to_account_info(), // ⚠️ This should be escrow authority PDA
-};
+    // FIX: Store user_pick.key() in a long-lived variable
+    let user_pick_key = user_pick.key();
+    let bump = ctx.bumps.escrow_pda;
 
-let cpi_ctx = CpiContext::new_with_signer(
-    ctx.accounts.token_program.to_account_info(),
-    cpi_accounts,
-    signer,
-);
+    // Build seed array with long-lived values
+    let seeds: [&[u8]; 3] = [
+        b"escrow",
+        user_pick_key.as_ref(),
+        &[bump],
+    ];
+    let signer: &[&[&[u8]]] = &[&seeds];
 
-    token::transfer(cpi_ctx, ctx.accounts.user_pick.bet_amount)?;
+    let cpi_accounts = Transfer {
+        from: ctx.accounts.escrow_pda.to_account_info(),
+        to: ctx.accounts.seller_token_account.to_account_info(),
+        authority: ctx.accounts.escrow_pda.to_account_info(),
+    };
+
+    let cpi_ctx = CpiContext::new_with_signer(
+        ctx.accounts.token_program.to_account_info(),
+        cpi_accounts,
+        signer,
+    );
+
+    token::transfer(cpi_ctx, 1)?;
 
     Ok(())
 }
+
+
 
 }
 
@@ -601,31 +627,41 @@ pub struct UserNonce {
 
 #[derive(Accounts)]
 pub struct DelistPick<'info> {
-    #[account(mut, has_one = owner)]
-    pub user_pick: Account<'info, UserPick>,
+    #[account(mut)]
+    pub seller: Signer<'info>,
 
     #[account(mut)]
-    pub owner: Signer<'info>,
+    pub user_pick: Account<'info, UserPick>,
 
     #[account(mut)]
     pub mint: Account<'info, Mint>,
 
-    #[account(mut,
-        seeds = [b"escrow", user_pick.key().as_ref()],
-        bump
+    #[account(mut)]
+    pub seller_token_account: Account<'info, TokenAccount>,
+
+    #[account(
+        mut,
+        associated_token::mint = mint,
+        associated_token::authority = escrow_pda,
     )]
     pub escrow_token_account: Account<'info, TokenAccount>,
 
-    #[account(mut)]
-    pub seller_token_account: Account<'info, TokenAccount>,
+    /// CHECK: Escrow authority
+    #[account(
+        seeds = [b"escrow", user_pick.key().as_ref()],
+        bump
+    )]
+    pub escrow_pda: UncheckedAccount<'info>,
 
     pub token_program: Program<'info, Token>,
 }
 
+
+
 #[derive(Accounts)]
 pub struct BuyPickNFT<'info> {
     #[account(mut)]
-    pub seller: Signer<'info>,
+    pub seller: SystemAccount<'info>, // No longer needs to sign
 
     #[account(mut)]
     pub buyer: Signer<'info>,
@@ -641,10 +677,17 @@ pub struct BuyPickNFT<'info> {
 
     #[account(
         mut,
-        associated_token::mint = mint,
-        associated_token::authority = seller
+        seeds = [b"escrow", user_pick.key().as_ref()],
+        bump,
     )]
-    pub seller_token_account: Account<'info, TokenAccount>,
+    pub escrow_token_account: Account<'info, TokenAccount>,
+
+    /// CHECK: escrow PDA signer
+    #[account(
+        seeds = [b"escrow", user_pick.key().as_ref()],
+        bump,
+    )]
+    pub escrow_pda: UncheckedAccount<'info>,
 
     #[account(
         init_if_needed,
@@ -662,6 +705,7 @@ pub struct BuyPickNFT<'info> {
     pub system_program: Program<'info, System>,
     pub rent: Sysvar<'info, Rent>,
 }
+
 
 #[derive(Accounts)]
 pub struct ListPickNFT<'info> {
@@ -733,8 +777,16 @@ pub struct ReclaimUnsoldPick<'info> {
     )]
     pub escrow_token_account: Account<'info, TokenAccount>,
 
-    pub token_program: Program<'info, Token>, // 👈 this was missing
+    /// CHECK: PDA signer for escrow authority
+    #[account(
+        seeds = [b"escrow", user_pick.key().as_ref()],
+        bump
+    )]
+    pub escrow_pda: UncheckedAccount<'info>,
+
+    pub token_program: Program<'info, Token>,
 }
+
 
 #[account]
 pub struct BetPool {
