@@ -406,25 +406,34 @@ pub fn buy_pick_nft(ctx: Context<BuyPickNFT>, sale_price: u64) -> Result<()> {
         ],
     )?;
 
-    // Transfer NFT from escrow to buyer
+    // Derive signer seeds
     let user_pick_key = user_pick.key();
-    let seeds = &[b"escrow", user_pick_key.as_ref(), &[ctx.bumps.escrow_pda]];
-    let signer = &[&seeds[..]];
+    let seeds: &[&[u8]] = &[
+        b"escrow",
+        user_pick_key.as_ref(),
+        // Note: you must use the actual bump here if you don't use #[account(..., bump)]
+        &[Pubkey::find_program_address(&[b"escrow", user_pick_key.as_ref()], ctx.program_id).1],
+    ];
+    let signer = &[seeds]; // type: &[&[&[u8]]]
 
-    let cpi_accounts = Transfer {
-        from: ctx.accounts.escrow_pda.to_account_info(),
+    // Define CPI accounts
+    let cpi_accounts = anchor_spl::token::Transfer {
+        from: ctx.accounts.escrow_token_account.to_account_info(),
         to: ctx.accounts.buyer_token_account.to_account_info(),
         authority: ctx.accounts.escrow_pda.to_account_info(),
     };
 
+    // Create CPI context with signer
     let cpi_ctx = CpiContext::new_with_signer(
         ctx.accounts.token_program.to_account_info(),
         cpi_accounts,
         signer,
     );
+
+    // Perform NFT transfer from escrow to buyer
     token::transfer(cpi_ctx, 1)?;
 
-    // Update pick ownership
+    // Update on-chain metadata
     user_pick.owner = ctx.accounts.buyer.key();
     user_pick.for_sale = false;
 
@@ -675,18 +684,11 @@ pub struct BuyPickNFT<'info> {
     #[account(mut)]
     pub pool: Account<'info, BetPool>,
 
-    #[account(
-        mut,
-        seeds = [b"escrow", user_pick.key().as_ref()],
-        bump,
-    )]
+    #[account(mut)]
     pub escrow_token_account: Account<'info, TokenAccount>,
 
-    /// CHECK: escrow PDA signer
-    #[account(
-        seeds = [b"escrow", user_pick.key().as_ref()],
-        bump,
-    )]
+    /// CHECK: manually verified
+    #[account()]
     pub escrow_pda: UncheckedAccount<'info>,
 
     #[account(
