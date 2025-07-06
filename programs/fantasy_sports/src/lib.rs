@@ -5,7 +5,8 @@ use anchor_spl::associated_token::{self, AssociatedToken};
 use anchor_lang::solana_program::program::{invoke, invoke_signed};
 use anchor_lang::solana_program::system_instruction;
 use std::str::FromStr;
-
+use anchor_lang::solana_program::program_option::COption;
+use anchor_spl::token::ID as TOKEN_PROGRAM_ID;
 declare_id!("6W1NLpkZvfu6y44nmCtQBLUEjGZQoCt6zQ9MouStHrFK");
 
 pub const ADMIN_PUBKEY: &str = "5DcirLSutTThvZu9AJK9yGWXqs4HHumRvrtzZQggb7dW";
@@ -241,8 +242,6 @@ require!(ctx.accounts.authority.key() == admin_pk, ErrorCode::Unauthorized);
 }
 
 pub fn settle_claim(ctx: Context<SettleClaim>) -> Result<()> {
-    msg!("test");
-
     let bet_pool = &ctx.accounts.bet_pool;
     let user_pick = &mut ctx.accounts.user_pick;
 
@@ -250,6 +249,43 @@ pub fn settle_claim(ctx: Context<SettleClaim>) -> Result<()> {
     require!(bet_pool.result_published, ErrorCode::PoolNotSettled);
     require!(!user_pick.claimed, ErrorCode::AlreadyClaimed);
 
+    // 🛑 Optional NFT reclaim if listed for sale
+    if user_pick.for_sale {
+        msg!("🛠 Reclaiming listed NFT from escrow...");
+
+let escrow_bump = Pubkey::find_program_address(
+    &[b"escrow", user_pick.key().as_ref()],
+    ctx.program_id,
+).1;
+
+let user_pick_key = user_pick.key(); // ✅ Extend lifetime
+
+let seeds: &[&[u8]] = &[
+    b"escrow",
+    user_pick_key.as_ref(),
+    &[escrow_bump],
+];
+let signer: &[&[&[u8]]] = &[seeds];
+
+let cpi_accounts = anchor_spl::token::Transfer {
+    from: ctx.accounts.escrow_token_account.to_account_info(),
+    to: ctx.accounts.recipient_token_account.to_account_info(),
+    authority: ctx.accounts.escrow_pda.to_account_info(),
+};
+
+let cpi_ctx = CpiContext::new_with_signer(
+    ctx.accounts.token_program.to_account_info(),
+    cpi_accounts,
+    signer,
+);
+
+token::transfer(cpi_ctx, 1)?;
+
+
+        user_pick.for_sale = false;
+    }
+
+    // Determine outcome
     let over_wins = bet_pool.final_stat > bet_pool.stat_line;
     let under_wins = bet_pool.final_stat < bet_pool.stat_line;
 
@@ -258,7 +294,7 @@ pub fn settle_claim(ctx: Context<SettleClaim>) -> Result<()> {
         (false, true) => false,
         _ => {
             user_pick.claimed = true;
-            return Ok(()); // Push/tie
+            return Ok(()); // Push/tie, no payout
         }
     };
 
@@ -267,6 +303,7 @@ pub fn settle_claim(ctx: Context<SettleClaim>) -> Result<()> {
         return Ok(()); // Didn't win
     }
 
+    // Payout logic
     let total_pool = bet_pool.total_over_amount + bet_pool.total_under_amount;
     let winner_pool = if winner_is_over {
         bet_pool.total_over_amount
@@ -278,15 +315,10 @@ pub fn settle_claim(ctx: Context<SettleClaim>) -> Result<()> {
         .checked_mul(total_pool as u128)
         .unwrap()
         / (winner_pool as u128);
-
     let payout = user_share as u64;
 
     msg!("Paying {} lamports to {}", payout, ctx.accounts.recipient.key());
-    msg!("🏦 total_pool: {}", total_pool);
-    msg!("🏆 winner_pool: {}", winner_pool);
-    msg!("💰 user_bet_amount: {}", user_pick.bet_amount);
 
-    // ✅ Manually transfer lamports between program-owned account and system account
     **ctx.accounts.bet_vault.to_account_info().try_borrow_mut_lamports()? -= payout;
     **ctx.accounts.recipient.to_account_info().try_borrow_mut_lamports()? += payout;
 
@@ -295,44 +327,6 @@ pub fn settle_claim(ctx: Context<SettleClaim>) -> Result<()> {
 }
 
 
-
-pub fn withdraw_fees(ctx: Context<WithdrawFees>) -> Result<()> {
-    let admin_pk = Pubkey::from_str(ADMIN_PUBKEY).unwrap();
-    require!(ctx.accounts.admin.key() == admin_pk, ErrorCode::Unauthorized);
-
-    let bet_pool = &ctx.accounts.bet_pool;
-
-    let (expected_fee_vault, _) = Pubkey::find_program_address(
-        &[b"fee_vault", bet_pool.key().as_ref()],
-        ctx.program_id,
-    );
-    require!(
-        ctx.accounts.fee_vault.key() == expected_fee_vault,
-        ErrorCode::InvalidFeeVault
-    );
-
-    let fee_vault_lamports = ctx.accounts.fee_vault.lamports();
-    if fee_vault_lamports < 5000 {
-        msg!(
-            "Skipping withdrawal: too few lamports ({}).",
-            fee_vault_lamports
-        );
-        return Ok(());
-    }
-
-    // ✅ Direct lamport transfer
-    **ctx.accounts.fee_vault.to_account_info().try_borrow_mut_lamports()? -= fee_vault_lamports;
-    **ctx.accounts.recipient.to_account_info().try_borrow_mut_lamports()? += fee_vault_lamports;
-
-    msg!(
-        "✅ Withdrew {} lamports from fee_vault {} to recipient {}",
-        fee_vault_lamports,
-        ctx.accounts.fee_vault.key(),
-        ctx.accounts.recipient.key()
-    );
-
-    Ok(())
-}
 
 pub fn delist_pick(ctx: Context<DelistPick>) -> Result<()> {
 let user_pick_key = ctx.accounts.user_pick.key(); // <-- Immutable borrow first
@@ -456,23 +450,15 @@ pub fn buy_pick_nft(ctx: Context<BuyPickNFT>, sale_price: u64) -> Result<()> {
 
 pub fn reclaim_unsold_pick(ctx: Context<ReclaimUnsoldPick>) -> Result<()> {
     let user_pick = &mut ctx.accounts.user_pick;
-
     user_pick.for_sale = false;
 
-    // FIX: Store user_pick.key() in a long-lived variable
     let user_pick_key = user_pick.key();
     let bump = ctx.bumps.escrow_pda;
-
-    // Build seed array with long-lived values
-    let seeds: [&[u8]; 3] = [
-        b"escrow",
-        user_pick_key.as_ref(),
-        &[bump],
-    ];
+    let seeds: [&[u8]; 3] = [b"escrow", user_pick_key.as_ref(), &[bump]];
     let signer: &[&[&[u8]]] = &[&seeds];
 
     let cpi_accounts = Transfer {
-        from: ctx.accounts.escrow_pda.to_account_info(),
+        from: ctx.accounts.escrow_token_account.to_account_info(),
         to: ctx.accounts.seller_token_account.to_account_info(),
         authority: ctx.accounts.escrow_pda.to_account_info(),
     };
@@ -487,8 +473,6 @@ pub fn reclaim_unsold_pick(ctx: Context<ReclaimUnsoldPick>) -> Result<()> {
 
     Ok(())
 }
-
-
 
 }
 
@@ -753,8 +737,25 @@ pub struct ListPickNFT<'info> {
 
 #[derive(Accounts)]
 pub struct ReclaimUnsoldPick<'info> {
+    /// CHECK: signer PDA that owns the escrow token account
+    #[account(
+        seeds = [b"escrow", user_pick.key().as_ref()],
+        bump
+    )]
+    pub escrow_pda: UncheckedAccount<'info>,
+
+#[account(
+    mut,
+    constraint = escrow_token_account.owner == TOKEN_PROGRAM_ID,
+    constraint = escrow_token_account.mint == mint.key(),
+    constraint = escrow_token_account.amount == 1,
+    constraint = escrow_token_account.delegate == COption::None,
+    constraint = escrow_token_account.close_authority == COption::None
+)]
+pub escrow_token_account: Account<'info, TokenAccount>,
+
     #[account(mut)]
-    pub seller: Signer<'info>,
+    pub seller_token_account: Account<'info, TokenAccount>,
 
     #[account(mut)]
     pub user_pick: Account<'info, UserPick>,
@@ -765,26 +766,9 @@ pub struct ReclaimUnsoldPick<'info> {
     #[account(mut)]
     pub pool: Account<'info, BetPool>,
 
-    #[account(
-        mut,
-        associated_token::mint = mint,
-        associated_token::authority = seller
-    )]
-    pub seller_token_account: Account<'info, TokenAccount>,
-
-    #[account(
-        mut,
-        seeds = [b"escrow", user_pick.key().as_ref()],
-        bump
-    )]
-    pub escrow_token_account: Account<'info, TokenAccount>,
-
-    /// CHECK: PDA signer for escrow authority
-    #[account(
-        seeds = [b"escrow", user_pick.key().as_ref()],
-        bump
-    )]
-    pub escrow_pda: UncheckedAccount<'info>,
+    /// CHECK: not a signer
+    #[account(mut)]
+    pub seller: AccountInfo<'info>,
 
     pub token_program: Program<'info, Token>,
 }
@@ -809,26 +793,6 @@ pub struct BetPool {
     pub bump: u8,
 }
 
-#[derive(Accounts)]
-pub struct WithdrawFees<'info> {
-    #[account(mut)]
-    pub admin: Signer<'info>,
-
-    #[account(mut, has_one = fee_vault)]
-    pub bet_pool: Account<'info, BetPool>,
-
-    #[account(
-        mut,
-        seeds = [b"fee_vault", bet_pool.key().as_ref()],
-        bump,
-    )]
-    pub fee_vault: UncheckedAccount<'info>,
-
-    #[account(mut)]
-    pub recipient: SystemAccount<'info>,
-
-    pub system_program: Program<'info, System>,
-}
 
 
 #[derive(Accounts)]
@@ -849,8 +813,37 @@ pub struct SettleClaim<'info> {
     )]
     pub bet_vault: UncheckedAccount<'info>,
 
+    #[account(mut)]
+    pub mint: Account<'info, Mint>,
+
+    #[account(
+        mut,
+        associated_token::mint = mint,
+        associated_token::authority = escrow_pda,
+    )]
+    pub escrow_token_account: Account<'info, TokenAccount>,
+
+    #[account(
+        init_if_needed,
+        payer = recipient,
+        associated_token::mint = mint,
+        associated_token::authority = recipient,
+    )]
+    pub recipient_token_account: Account<'info, TokenAccount>,
+
+    /// CHECK: Escrow PDA
+    #[account(
+        seeds = [b"escrow", user_pick.key().as_ref()],
+        bump
+    )]
+    pub escrow_pda: UncheckedAccount<'info>,
+
+    pub token_program: Program<'info, Token>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
     pub system_program: Program<'info, System>,
+    pub rent: Sysvar<'info, Rent>,
 }
+
 
 
 
