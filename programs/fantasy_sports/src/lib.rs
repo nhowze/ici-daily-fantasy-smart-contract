@@ -249,43 +249,57 @@ pub fn settle_claim(ctx: Context<SettleClaim>) -> Result<()> {
     require!(bet_pool.result_published, ErrorCode::PoolNotSettled);
     require!(!user_pick.claimed, ErrorCode::AlreadyClaimed);
 
-    // 🛑 Optional NFT reclaim if listed for sale
+    // Optional NFT reclaim if listed
     if user_pick.for_sale {
         msg!("🛠 Reclaiming listed NFT from escrow...");
 
-let escrow_bump = Pubkey::find_program_address(
-    &[b"escrow", user_pick.key().as_ref()],
-    ctx.program_id,
-).1;
+        let escrow_bump = Pubkey::find_program_address(
+            &[b"escrow", user_pick.key().as_ref()],
+            ctx.program_id,
+        ).1;
 
-let user_pick_key = user_pick.key(); // ✅ Extend lifetime
+        let user_pick_key = user_pick.key(); // 🔒 Extend lifetime
 
-let seeds: &[&[u8]] = &[
-    b"escrow",
-    user_pick_key.as_ref(),
-    &[escrow_bump],
-];
-let signer: &[&[&[u8]]] = &[seeds];
+        let seeds: &[&[u8]] = &[
+            b"escrow",
+            user_pick_key.as_ref(),
+            &[escrow_bump],
+        ];
 
-let cpi_accounts = anchor_spl::token::Transfer {
-    from: ctx.accounts.escrow_token_account.to_account_info(),
-    to: ctx.accounts.recipient_token_account.to_account_info(),
-    authority: ctx.accounts.escrow_pda.to_account_info(),
-};
+        let signer: &[&[&[u8]]] = &[seeds];
 
-let cpi_ctx = CpiContext::new_with_signer(
-    ctx.accounts.token_program.to_account_info(),
-    cpi_accounts,
-    signer,
-);
+        let cpi_accounts = anchor_spl::token::Transfer {
+            from: ctx.accounts.escrow_token_account.to_account_info(),
+            to: ctx.accounts.recipient_token_account.to_account_info(),
+            authority: ctx.accounts.escrow_pda.to_account_info(),
+        };
 
-token::transfer(cpi_ctx, 1)?;
+        let cpi_ctx = CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            cpi_accounts,
+            signer,
+        );
 
-
+        token::transfer(cpi_ctx, 1)?;
         user_pick.for_sale = false;
     }
 
-    // Determine outcome
+    // ✅ Handle one-sided refund (no opposite picks)
+    let has_only_over = bet_pool.total_under_amount == 0;
+    let has_only_under = bet_pool.total_over_amount == 0;
+
+    if has_only_over || has_only_under {
+        let refund = user_pick.bet_amount;
+        msg!("💸 Refunding {} lamports to {}", refund, ctx.accounts.recipient.key());
+
+        **ctx.accounts.bet_vault.to_account_info().try_borrow_mut_lamports()? -= refund;
+        **ctx.accounts.recipient.to_account_info().try_borrow_mut_lamports()? += refund;
+
+        user_pick.claimed = true;
+        return Ok(());
+    }
+
+    // 🧠 Regular outcome logic
     let over_wins = bet_pool.final_stat > bet_pool.stat_line;
     let under_wins = bet_pool.final_stat < bet_pool.stat_line;
 
@@ -300,10 +314,10 @@ token::transfer(cpi_ctx, 1)?;
 
     if user_pick.pick_side != winner_is_over {
         user_pick.claimed = true;
-        return Ok(()); // Didn't win
+        return Ok(()); // Lost
     }
 
-    // Payout logic
+    // 🧮 Payout calculation
     let total_pool = bet_pool.total_over_amount + bet_pool.total_under_amount;
     let winner_pool = if winner_is_over {
         bet_pool.total_over_amount
@@ -317,7 +331,7 @@ token::transfer(cpi_ctx, 1)?;
         / (winner_pool as u128);
     let payout = user_share as u64;
 
-    msg!("Paying {} lamports to {}", payout, ctx.accounts.recipient.key());
+    msg!("🏆 Paying {} lamports to {}", payout, ctx.accounts.recipient.key());
 
     **ctx.accounts.bet_vault.to_account_info().try_borrow_mut_lamports()? -= payout;
     **ctx.accounts.recipient.to_account_info().try_borrow_mut_lamports()? += payout;
@@ -325,7 +339,6 @@ token::transfer(cpi_ctx, 1)?;
     user_pick.claimed = true;
     Ok(())
 }
-
 
 
 pub fn delist_pick(ctx: Context<DelistPick>) -> Result<()> {
