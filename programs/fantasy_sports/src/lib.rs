@@ -249,40 +249,6 @@ pub fn settle_claim(ctx: Context<SettleClaim>) -> Result<()> {
     require!(bet_pool.result_published, ErrorCode::PoolNotSettled);
     require!(!user_pick.claimed, ErrorCode::AlreadyClaimed);
 
-    // Optional NFT reclaim if listed
-    if user_pick.for_sale {
-        msg!("🛠 Reclaiming listed NFT from escrow...");
-
-        let escrow_bump = Pubkey::find_program_address(
-            &[b"escrow", user_pick.key().as_ref()],
-            ctx.program_id,
-        ).1;
-
-        let user_pick_key = user_pick.key(); // 🔒 Extend lifetime
-
-        let seeds: &[&[u8]] = &[
-            b"escrow",
-            user_pick_key.as_ref(),
-            &[escrow_bump],
-        ];
-
-        let signer: &[&[&[u8]]] = &[seeds];
-
-        let cpi_accounts = anchor_spl::token::Transfer {
-            from: ctx.accounts.escrow_token_account.to_account_info(),
-            to: ctx.accounts.recipient_token_account.to_account_info(),
-            authority: ctx.accounts.escrow_pda.to_account_info(),
-        };
-
-        let cpi_ctx = CpiContext::new_with_signer(
-            ctx.accounts.token_program.to_account_info(),
-            cpi_accounts,
-            signer,
-        );
-
-        token::transfer(cpi_ctx, 1)?;
-        user_pick.for_sale = false;
-    }
 
     // ✅ Handle one-sided refund (no opposite picks)
     let has_only_over = bet_pool.total_under_amount == 0;
@@ -822,39 +788,11 @@ pub struct SettleClaim<'info> {
     #[account(
         mut,
         seeds = [b"bet_vault", bet_pool.key().as_ref()],
-        bump,
-    )]
-    pub bet_vault: UncheckedAccount<'info>,
-
-    #[account(mut)]
-    pub mint: Account<'info, Mint>,
-
-    #[account(
-        mut,
-        associated_token::mint = mint,
-        associated_token::authority = escrow_pda,
-    )]
-    pub escrow_token_account: Account<'info, TokenAccount>,
-
-    #[account(
-        init_if_needed,
-        payer = recipient,
-        associated_token::mint = mint,
-        associated_token::authority = recipient,
-    )]
-    pub recipient_token_account: Account<'info, TokenAccount>,
-
-    /// CHECK: Escrow PDA
-    #[account(
-        seeds = [b"escrow", user_pick.key().as_ref()],
         bump
     )]
-    pub escrow_pda: UncheckedAccount<'info>,
+    pub bet_vault: AccountInfo<'info>,
 
-    pub token_program: Program<'info, Token>,
-    pub associated_token_program: Program<'info, AssociatedToken>,
     pub system_program: Program<'info, System>,
-    pub rent: Sysvar<'info, Rent>,
 }
 
 
