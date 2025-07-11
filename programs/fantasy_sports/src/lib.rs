@@ -29,9 +29,15 @@ pub enum ErrorCode {
     #[msg("Betting deadline must be in the future.")]
     DeadlinePassed,
     #[msg("Result already published for this bet pool.")]
-    AlreadyPublished, // e.g., 0x65 if you want
+    AlreadyPublished,
     #[msg("This pick is not listed for sale.")]
-    NotListedForSale, // ✅ Add this line
+    NotListedForSale,
+    #[msg("Invalid token balance in escrow account.")]
+    InvalidTokenBalance,
+    #[msg("Escrow token account has an unexpected delegate.")]
+    UnexpectedDelegate,
+    #[msg("Escrow token account has an unexpected close authority.")]
+    UnexpectedCloseAuthority,
 }
 
 
@@ -109,7 +115,7 @@ pub fn place_bet(
     pick_side: bool,
     _sport_name: [u8; 32],
 ) -> Result<()> {
-    // 🔢 1. Save current nonce and increment it
+    // 1. Save current nonce and increment it
     let nonce = ctx.accounts.user_nonce.count;
     ctx.accounts.user_nonce.count += 1;
 
@@ -250,7 +256,7 @@ pub fn settle_claim(ctx: Context<SettleClaim>) -> Result<()> {
     require!(!user_pick.claimed, ErrorCode::AlreadyClaimed);
 
 
-    // ✅ Handle one-sided refund (no opposite picks)
+    // Handle one-sided refund (no opposite picks)
     let has_only_over = bet_pool.total_under_amount == 0;
     let has_only_under = bet_pool.total_over_amount == 0;
 
@@ -265,7 +271,7 @@ pub fn settle_claim(ctx: Context<SettleClaim>) -> Result<()> {
         return Ok(());
     }
 
-    // 🧠 Regular outcome logic
+    // Regular outcome logic
     let over_wins = bet_pool.final_stat > bet_pool.stat_line;
     let under_wins = bet_pool.final_stat < bet_pool.stat_line;
 
@@ -283,7 +289,7 @@ pub fn settle_claim(ctx: Context<SettleClaim>) -> Result<()> {
         return Ok(()); // Lost
     }
 
-    // 🧮 Payout calculation
+    // Payout calculation
     let total_pool = bet_pool.total_over_amount + bet_pool.total_under_amount;
     let winner_pool = if winner_is_over {
         bet_pool.total_over_amount
@@ -333,7 +339,7 @@ let cpi_ctx = CpiContext::new_with_signer(
 
 token::transfer(cpi_ctx, 1)?;
 
-// Now you can mutably borrow `user_pick`
+// Now can mutably borrow `user_pick`
 let user_pick = &mut ctx.accounts.user_pick;
 user_pick.for_sale = false;
 
@@ -485,7 +491,6 @@ pub struct InitializeBetPool<'info> {
     )]
     pub bet_pool: Account<'info, BetPool>,
 
-    /// CHECK: PDA lamport vault
 #[account(
     init,
     payer = admin,
@@ -495,7 +500,6 @@ pub struct InitializeBetPool<'info> {
 )]
 pub fee_vault: UncheckedAccount<'info>,
 
-/// CHECK: PDA lamport vault for net bets
 #[account(
     init,
     payer = admin,
@@ -522,7 +526,7 @@ pub struct PlaceBet<'info> {
     #[account(
         init_if_needed,
         payer = bettor,
-        space = 8 + 8, // 8 discriminator + u64 count
+        space = 8 + 8,
         seeds = [b"user_nonce", bettor.key().as_ref(), bet_pool.key().as_ref()],
         bump
     )]
@@ -556,19 +560,15 @@ pub struct PlaceBet<'info> {
         seeds = [b"mint", user_pick.key().as_ref()],
         bump
     )]
-    /// CHECK: PDA mint authority signer
     pub mint_authority: UncheckedAccount<'info>,
 
     #[account(mut)]
-    /// CHECK: created in-program if needed
     pub user_token_account: AccountInfo<'info>,
 
     #[account(mut)]
-    /// CHECK: PDA for fee collection
     pub fee_vault: UncheckedAccount<'info>,
 
     #[account(mut)]
-    /// CHECK: PDA for net bet storage
     pub bet_vault: UncheckedAccount<'info>,
 
     pub token_program: Program<'info, Token>,
@@ -576,8 +576,6 @@ pub struct PlaceBet<'info> {
     pub system_program: Program<'info, System>,
     pub rent: Sysvar<'info, Rent>,
 }
-
-
 
 #[account]
 pub struct UserPick {
@@ -618,7 +616,6 @@ pub struct DelistPick<'info> {
     )]
     pub escrow_token_account: Account<'info, TokenAccount>,
 
-    /// CHECK: Escrow authority
     #[account(
         seeds = [b"escrow", user_pick.key().as_ref()],
         bump
@@ -633,7 +630,7 @@ pub struct DelistPick<'info> {
 #[derive(Accounts)]
 pub struct BuyPickNFT<'info> {
     #[account(mut)]
-    pub seller: SystemAccount<'info>, // No longer needs to sign
+    pub seller: SystemAccount<'info>,
 
     #[account(mut)]
     pub buyer: Signer<'info>,
@@ -650,7 +647,6 @@ pub struct BuyPickNFT<'info> {
     #[account(mut)]
     pub escrow_token_account: Account<'info, TokenAccount>,
 
-    /// CHECK: manually verified
     #[account()]
     pub escrow_pda: UncheckedAccount<'info>,
 
@@ -701,7 +697,6 @@ pub struct ListPickNFT<'info> {
     )]
     pub escrow_token_account: Account<'info, TokenAccount>,
 
-    /// CHECK: PDA to own NFT
     #[account(
         seeds = [b"escrow", user_pick.key().as_ref()],
         bump
@@ -716,22 +711,21 @@ pub struct ListPickNFT<'info> {
 
 #[derive(Accounts)]
 pub struct ReclaimUnsoldPick<'info> {
-    /// CHECK: signer PDA that owns the escrow token account
     #[account(
         seeds = [b"escrow", user_pick.key().as_ref()],
         bump
     )]
     pub escrow_pda: UncheckedAccount<'info>,
 
-#[account(
-    mut,
-    constraint = escrow_token_account.owner == TOKEN_PROGRAM_ID,
-    constraint = escrow_token_account.mint == mint.key(),
-    constraint = escrow_token_account.amount == 1,
-    constraint = escrow_token_account.delegate == COption::None,
-    constraint = escrow_token_account.close_authority == COption::None
-)]
-pub escrow_token_account: Account<'info, TokenAccount>,
+    #[account(
+        mut,
+        associated_token::mint = mint,
+        associated_token::authority = escrow_pda,
+        constraint = escrow_token_account.amount == 1 @ ErrorCode::InvalidTokenBalance,
+        constraint = escrow_token_account.delegate == COption::None @ ErrorCode::UnexpectedDelegate,
+        constraint = escrow_token_account.close_authority == COption::None @ ErrorCode::UnexpectedCloseAuthority,
+    )]
+    pub escrow_token_account: Account<'info, TokenAccount>,
 
     #[account(mut)]
     pub seller_token_account: Account<'info, TokenAccount>,
@@ -745,12 +739,12 @@ pub escrow_token_account: Account<'info, TokenAccount>,
     #[account(mut)]
     pub pool: Account<'info, BetPool>,
 
-    /// CHECK: not a signer
     #[account(mut)]
     pub seller: AccountInfo<'info>,
 
     pub token_program: Program<'info, Token>,
 }
+
 
 
 #[account]
